@@ -201,6 +201,31 @@ def cmd_proofread(a) -> int:
     return 0
 
 
+def cmd_roughcut(a) -> int:
+    from .pipeline import PipelineConfig, export_all
+    from .roughcut import RoughCutConfig, rough_cut
+
+    cfg = RoughCutConfig(level=a.level, fillers=not a.no_fillers, repeats=not a.no_repeats,
+                         retakes=not a.no_retakes, unrecognized=not a.no_unrecognized, pauses=not a.no_pauses,
+                         max_pause=a.max_pause, keep_pause=a.keep_pause, min_gap=a.min_gap,
+                         crossfade_ms=a.crossfade_ms, extra_fillers=_csv(a.fillers) or (),
+                         keep_words=_csv(a.keep) or (), llm=a.llm)
+    plan = json.loads(Path(a.plan).read_text(encoding="utf-8")) if a.plan else None
+    out = a.out or str(Path(a.audio).parent / "output")
+    res = rough_cut(Path(a.audio), Path(out), cfg, script=_read_script(a.script), plan=plan, language=a.lang,
+                    asr_backend=a.asr, asr_model=a.asr_model, device=a.device, ctc=a.ctc,
+                    audio_format=a.format, video=not a.no_video,
+                    llm_client=_llm_cfg(a).client() if a.llm and plan is None else None)
+    files = [str(f) for f in res["files"]]
+    pcfg = PipelineConfig(export=_export_cfg(a))
+    if pcfg.export.formats is None:
+        pcfg.export.formats = ["srt", "json"]
+    if res["document"].lines and pcfg.export.formats:
+        files += [str(f) for f in export_all(res["document"], out, res["base"] + ".cut", pcfg)]
+    print(json.dumps({"stats": res["stats"], "files": files}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_formats(_a) -> int:
     from .formats import FORMATS
     from .segment.layout import LAYOUTS
@@ -277,6 +302,36 @@ def build_parser() -> argparse.ArgumentParser:
     _add_export(s)
     _add_llm(s)
     s.set_defaults(func=cmd_proofread)
+
+    s = sub.add_parser("roughcut", help="speech rough cut: remove fillers / repeats / retakes / long pauses")
+    s.add_argument("audio")
+    s.add_argument("--script", help="verbatim transcript (optional; recognised otherwise)")
+    s.add_argument("--plan", help="edited plan (.roughcut.json) to render instead of detecting again")
+    g = s.add_argument_group("recognition")
+    g.add_argument("--lang")
+    g.add_argument("--asr", default="auto", help="auto | faster-whisper | whisper | openai | funasr")
+    g.add_argument("--asr-model")
+    g.add_argument("--ctc", default="auto", choices=["auto", "on", "off"], help="CTC (only with --script)")
+    g.add_argument("--device")
+    g = s.add_argument_group("what to cut")
+    g.add_argument("--level", default="standard", choices=["conservative", "standard", "aggressive"])
+    g.add_argument("--no-fillers", action="store_true", help="keep 嗯/呃/um ...")
+    g.add_argument("--no-repeats", action="store_true", help="keep stutters / repeated words")
+    g.add_argument("--no-retakes", action="store_true", help="keep sentences said twice")
+    g.add_argument("--no-unrecognized", action="store_true", help="keep voiced sounds the recogniser skipped")
+    g.add_argument("--no-pauses", action="store_true", help="do not shorten long pauses")
+    g.add_argument("--max-pause", type=float, help="pauses longer than this are shortened (s)")
+    g.add_argument("--keep-pause", type=float, help="length a long pause is shortened to (s)")
+    g.add_argument("--min-gap", type=float, default=0.12, help="pause left where a cut joins two words (s)")
+    g.add_argument("--crossfade-ms", type=float, default=25.0)
+    g.add_argument("--fillers", help="extra filler words, comma separated")
+    g.add_argument("--keep", help="words never cut, comma separated")
+    g.add_argument("--llm", action="store_true", help="let the LLM mark redundant phrases (废话)")
+    g.add_argument("--format", help="output audio format: wav | mp3 | flac | m4a (default: like the input)")
+    g.add_argument("--no-video", action="store_true", help="audio only, even for video input")
+    _add_export(s)
+    _add_llm(s)
+    s.set_defaults(func=cmd_roughcut)
 
     s = sub.add_parser("formats", help="list formats, style presets and layouts")
     s.set_defaults(func=cmd_formats)

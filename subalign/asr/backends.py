@@ -24,10 +24,24 @@ from ..text.tokenize import normalize_key, tokenize
 from .base import ASRBackend, Segment, Transcript, Word
 
 
+def _preload_torch_cudnn() -> None:
+    """ctranslate2 ships its own cudnn64_9 loader; if it is loaded first and torch's
+    (older) cuDNN sub-libraries are found later, the process aborts with "Could not
+    load symbol cudnnGetLibConfig".  Loading torch's cuDNN first keeps one consistent set."""
+    try:
+        import torch  # type: ignore
+
+        if torch.cuda.is_available():
+            torch.backends.cudnn.version()
+    except Exception:
+        pass
+
+
 class FasterWhisperBackend(ASRBackend):
     name = "faster-whisper"
 
     def __init__(self, model: str = "large-v3", device: str = "auto", compute_type: str = "default"):
+        _preload_torch_cudnn()
         try:
             from faster_whisper import WhisperModel  # type: ignore
         except ImportError as e:  # pragma: no cover

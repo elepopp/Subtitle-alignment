@@ -295,6 +295,8 @@ const ICONS = {
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
   audio: '<path d="M2 13a2 2 0 0 0 2-2V7a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0V4a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0v-4a2 2 0 0 1 2-2"/>',
   settings: '<path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
+  scissors: '<circle cx="6" cy="6" r="3"/><path d="M8.12 8.12 12 12"/><path d="M20 4 8.12 15.88"/><circle cx="6" cy="18" r="3"/><path d="M14.8 14.8 20 20"/>',
+  video: '<path d="m16 13 5.2 3.1a.5.5 0 0 0 .8-.4V8.3a.5.5 0 0 0-.8-.4L16 11"/><rect x="2" y="6" width="14" height="12" rx="2"/>',
 };
 const ico = (name, cls = "") => h("span", { style: "display:inline-flex", html: `<svg class="i ${cls}" viewBox="0 0 24 24">${ICONS[name] || ""}</svg>` });
 
@@ -366,6 +368,23 @@ const F = {
   plang: { flag: "--lang", type: "select", label: "语言", opts: LANGS },
   rulesOnly: { flag: "--rules-only", type: "check", label: "仅规则 (术语表/语气词)，不调用大模型" },
 };
+Object.assign(F, {
+  rcLevel: { flag: "--level", type: "select", label: "剪辑力度", opts: [["standard", "标准（推荐）"], ["conservative", "保守：只删 嗯/呃"], ["aggressive", "激进：含 然后/这个/就是"]] },
+  rcFillers: { flag: "--no-fillers", type: "neg", label: "删除语气词 嗯/呃/啊" },
+  rcRepeats: { flag: "--no-repeats", type: "neg", label: "删除重复 / 口吃" },
+  rcRetakes: { flag: "--no-retakes", type: "neg", label: "删除重录句（保留最后一遍）" },
+  rcUnrec: { flag: "--no-unrecognized", type: "neg", label: "删除未识别的发声" },
+  rcPauses: { flag: "--no-pauses", type: "neg", label: "缩短长停顿" },
+  rcMaxPause: { flag: "--max-pause", type: "number", label: "超过多长算长停顿 (秒)", step: "0.05", placeholder: "按力度：1.2 / 0.8 / 0.6" },
+  rcKeepPause: { flag: "--keep-pause", type: "number", label: "长停顿缩短到 (秒)", step: "0.05", placeholder: "按力度：0.5 / 0.4 / 0.3" },
+  rcMinGap: { flag: "--min-gap", type: "number", label: "剪点最短停顿 (秒)", step: "0.01", placeholder: "0.12", hint: "两个词之间被剪掉内容又没有停顿时，补一段环境底噪，避免硬接" },
+  rcCrossfade: { flag: "--crossfade-ms", type: "number", label: "交叉淡化 (毫秒)", step: "1", placeholder: "25" },
+  rcExtra: { flag: "--fillers", type: "text", label: "额外要删的口头禅", placeholder: "反正,对吧,you know" },
+  rcKeep: { flag: "--keep", type: "text", label: "永远保留的词", placeholder: "啊哈" },
+  rcLLM: { flag: "--llm", type: "check", label: "大模型识别废话（多余的句子 / 绕口话）" },
+  rcFormat: { flag: "--format", type: "select", label: "输出音频格式", opts: [["", "同输入"], ["wav", "wav"], ["mp3", "mp3 320k"], ["flac", "flac"], ["m4a", "m4a"]] },
+  rcNoVideo: { flag: "--no-video", type: "check", label: "视频输入也只输出音频" },
+});
 const EXPORT = ["formats", "layout", "fontSize", "maxChars", "maxLines", "punct", "mono", "style"];
 
 const TASKS = {
@@ -397,6 +416,13 @@ const TASKS = {
     nav: "字幕翻译", icon: "🌐", title: "字幕翻译 translate", desc: "大模型按行翻译，时间轴不变，可导出双语字幕。",
     text: { label: "输入字幕 / 歌词", required: true, name: "input.srt", nameEditable: true },
     basic: ["to", "instructions", "inputFormat", "kind", "shift"], adv: [], glossary: true, export: true, llmTask: true, defaultFormats: [],
+  },
+  roughcut: {
+    nav: "语音粗剪", title: "语音粗剪 roughcut", desc: "识别并剪掉语气词、口吃重复、重录句和过长停顿；剪点对齐静音、自动交叉淡化并保留自然停顿，听不出剪辑痕迹。",
+    media: true, sample: null, text: { label: "逐字稿 (可选，不填则自动识别)", hint: "有原话逐字稿时可粘贴；没有就留空", name: "script.txt" },
+    basic: ["rcLevel", "rcFillers", "rcRepeats", "rcRetakes", "rcUnrec", "rcPauses", "lang", "asr", "asrModel"],
+    adv: ["rcMaxPause", "rcKeepPause", "rcMinGap", "rcCrossfade", "rcExtra", "rcKeep", "rcFormat", "rcNoVideo", "device"],
+    llm: ["rcLLM"], export: true, defaultFormats: ["srt", "json"],
   },
   proofread: {
     nav: "字幕校对", icon: "✅", title: "字幕校对 proofread", desc: "大模型修正识别错误（时间轴不变），或仅用术语表 / 语气词规则。",
@@ -437,6 +463,8 @@ function fieldEl(key, task, state) {
   }
   if (f.type === "text" || f.type === "number")
     return wrap(h("input", { id, type: f.type, step: f.step, value: val ?? "", placeholder: f.placeholder || "", oninput: e => set(e.target.value) }));
+  if (f.type === "neg")
+    return h("div", { class: "field", style: "justify-content:flex-end" }, h("label", { class: "check" }, h("input", { type: "checkbox", checked: val !== false, onchange: e => set(e.target.checked) }), f.label));
   if (f.type === "check")
     return h("div", { class: "field", style: "justify-content:flex-end" }, h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!val, onchange: e => set(e.target.checked) }), f.label));
   if (f.type === "multi") {
@@ -487,6 +515,7 @@ function buildArgs(task, state) {
   for (const k of keys) {
     const f = F[k], v = state[k];
     if (f.type === "check") { if (v) args.push([f.flag, true]); continue; }
+    if (f.type === "neg") { if (v === false) args.push([f.flag, true]); continue; }
     if (f.type === "multi") { const l = v ?? f.def; if (l?.length) args.push([f.flag, l.join(",")]); continue; }
     if (f.type === "formats") { const l = v ?? T.defaultFormats; if (l?.length) args.push([f.flag, l.join(",")]); continue; }
     if (f.type === "layout") {
@@ -506,7 +535,7 @@ function buildArgs(task, state) {
       args.push([f.flag, opts[0][0]]);
     }
   }
-  const needsLLM = T.llmTask ? !state.rulesOnly : (state.translate || state.llmProof);
+  const needsLLM = T.llmTask ? !state.rulesOnly : (state.translate || state.llmProof || state.rcLLM);
   if (needsLLM) args.push(...llmArgs());
   return { args, styleJson };
 }
@@ -515,13 +544,14 @@ function buildArgs(task, state) {
 const PAGES = {
   status: { nav: "状态总览", icon: "dashboard", render: renderStatus },
   align: { nav: "语音对齐", icon: "mic" }, lyrics: { nav: "歌词对齐", icon: "music" }, separate: { nav: "人声分离", icon: "wave" },
+  roughcut: { nav: "语音粗剪", icon: "scissors" },
   convert: { nav: "格式转换", icon: "convert" }, translate: { nav: "字幕翻译", icon: "translate" }, proofread: { nav: "字幕校对", icon: "check" },
   formats: { nav: "格式与样式", icon: "book", render: renderFormats },
   jobs: { nav: "任务记录", icon: "history", render: renderJobs },
   tests: { nav: "单元测试", icon: "flask", render: renderTests },
 };
 for (const k of Object.keys(TASKS)) PAGES[k].render = () => renderTask(k);
-const NAV = [["", ["status"]], ["对齐", ["align", "lyrics", "separate"]], ["字幕工具", ["convert", "translate", "proofread"]], ["系统", ["formats", "jobs", "tests"]]];
+const NAV = [["", ["status"]], ["对齐", ["align", "lyrics", "separate"]], ["剪辑", ["roughcut"]], ["字幕工具", ["convert", "translate", "proofread"]], ["系统", ["formats", "jobs", "tests"]]];
 let current = location.hash.slice(1) || store.get("page", "status");
 
 function renderNav() {
@@ -647,7 +677,7 @@ function renderTask(task) {
       t2.textContent = T.text ? "带逐字真值；合成音色不是人声，运行时自动关闭 CTC / 识别，只测声学对齐" : "带逐字真值";
       if (T.text && !textArea.value.trim()) textArea.value = r.text;
     } }, ico("sparkles"), "使用合成测试音频");
-    inputs.append(h("div", { class: "field" }, h("label", {}, "音频 / 视频"), drop, h("div", { class: "row", style: "justify-content:flex-end" }, sampleBtn)));
+    inputs.append(h("div", { class: "field" }, h("label", {}, "音频 / 视频"), drop, T.sample ? h("div", { class: "row", style: "justify-content:flex-end" }, sampleBtn) : null));
   }
   let textArea = null, textName = null;
   if (T.text) {
@@ -745,7 +775,7 @@ async function showJob(id, box, task) {
     h("span", { class: "ttl" }, (TASKS[j.task]?.nav || j.task) + " 结果"),
     h("span", { class: st[0] }, st[1] + (j.status === "queued" && j.queue_position ? ` #${j.queue_position}` : "")),
     h("span", { class: "meta" }, `${j.id}${dur ? " · " + dur : ""}`), h("span", { class: "sp" }), copyBtn,
-    j.meta?.parent ? h("div", { class: "parent" }, "由任务 ", h("a", { href: "#", onclick: e => { e.preventDefault(); showJob(j.meta.parent, box, task); } }, j.meta.parent), " 人工校对文本后重新对齐") : null,
+    j.meta?.parent ? h("div", { class: "parent" }, "由任务 ", h("a", { href: "#", onclick: e => { e.preventDefault(); showJob(j.meta.parent, box, task); } }, j.meta.parent), j.task === "roughcut" ? " 按审阅结果重新生成" : " 人工校对文本后重新对齐") : null,
     live ? h("div", { class: "lastlog" }, (j.log || "").trim().split("\n").filter(Boolean).pop() || "等待开始…") : null,
     live ? h("div", { class: "bar" }) : null);
   frag.append(bar);
@@ -787,7 +817,14 @@ async function outputTabs(j, box, task) {
   const files = j.files || [];
   const tabs = [];
   const audios = files.filter(f => f.kind === "audio");
-  const jsonF = files.find(f => f.kind === "json" && !f.name.includes("proofread"));
+  const jsonF = files.find(f => f.kind === "json" && !f.name.includes("proofread") && !f.name.includes(".roughcut."));
+  if (j.task === "roughcut") {
+    // previews play the edited media, not the source
+    const cutMedia = files.find(f => f.kind === "video" && /\.cut\./.test(f.name)) || files.find(f => f.kind === "audio" && /\.cut\./.test(f.name));
+    const planF = files.find(f => /\.roughcut\.json$/.test(f.name));
+    if (planF) tabs.push({ key: "review", label: "剪辑审阅", icon: "scissors", build: () => roughcutCard(planF, j, box, task || j.task, files) });
+    j = { ...j, meta: { ...(j.meta || {}), source_media: j.meta?.media, media: cutMedia?.url || j.meta?.media } };
+  }
   let doc = null;
   if (jsonF) { try { doc = await (await fetch(jsonF.url)).json(); } catch (e) {} }
   if (doc?.lines) {
@@ -802,23 +839,130 @@ async function outputTabs(j, box, task) {
   const assFiles = files.filter(f => /\.ass$/i.test(f.name));
   if (assFiles.length) tabs.push({ key: "ass", label: "特效字幕", icon: "sparkles", build: () => assPreviewCard(assFiles, j, audios) });
   const md = files.find(f => f.kind === "markdown");
-  if (md) tabs.push({ key: "report", label: "校对报告", icon: "report", build: async () => {
+  if (md) tabs.push({ key: "report", label: j.task === "roughcut" ? "剪辑报告" : "校对报告", icon: "report", build: async () => {
     const t = await (await fetch(md.url)).text();
-    return h("div", { class: "card" }, h("h3", {}, ico("report"), "稿件与实际语音的差异"), h("div", { class: "md", html: miniMd(t) }));
+    return h("div", { class: "card" }, h("h3", {}, ico("report"), j.task === "roughcut" ? "剪辑明细" : "稿件与实际语音的差异"), h("div", { class: "md", html: miniMd(t) }));
   } });
   if (files.length) tabs.push({ key: "files", label: "输出文件", icon: "download", badge: String(files.length), build: () => filesView(files, audios, jsonF) });
   return tabs;
+}
+
+// ---------------------------------------------------------------- rough cut review
+const RC_REASONS = { filler: ["语气词", "#e8590c"], repeat: ["重复 / 口吃", "#7048e8"], retake: ["重录句", "#1971c2"],
+  unrecognized: ["未识别发声", "#868e96"], llm: ["大模型", "#0c8599"], manual: ["手动", "#c2255c"] };
+async function roughcutCard(planF, j, box, task, files) {
+  const plan = await (await fetch(planF.url)).json();
+  const items = plan.items;
+  const st = plan.stats || {};
+  const card = h("div", { class: "card" });
+  const cutAudio = files.find(f => f.kind === "audio" && /\.cut\./.test(f.name));
+  const src = j.meta?.media;
+  const srcPlayer = h("audio", { controls: true, preload: "metadata", src: src || "" });
+  const cutPlayer = h("audio", { controls: true, preload: "metadata", src: cutAudio?.url || "" });
+  const fmt = s => s == null ? "" : `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
+  const saved = st.duration ? st.duration - st.output_duration : 0;
+  card.append(h("h3", {}, ico("scissors"), "剪辑审阅",
+    h("span", { class: "badge ok" }, `${fmt(st.duration)} → ${fmt(st.output_duration)}`),
+    h("span", { class: "badge" }, `减少 ${saved.toFixed(1)} 秒 · ${Math.round((st.removed_ratio || 0) * 100)}%`),
+    h("span", { class: "badge" }, `${st.joints ?? 0} 个剪点`)));
+  card.append(h("div", { class: "grid", style: "grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:14px" },
+    h("div", { class: "field" }, h("label", {}, "原始"), srcPlayer), h("div", { class: "field" }, h("label", {}, "剪辑后"), cutPlayer)));
+
+  // category toggles
+  const counts = {};            // number of cut passages (contiguous runs), not characters
+  [...items].sort((a, b) => a.start - b.start).forEach((it, k, arr) => {
+    if (it.auto && (k === 0 || arr[k - 1].auto !== it.auto || it.island || arr[k - 1].island)) counts[it.auto] = (counts[it.auto] || 0) + 1;
+  });
+  const catBox = h("div", { class: "checks", style: "margin-bottom:12px" });
+  const sync = () => { render(); markDirty(); };
+  Object.entries(RC_REASONS).forEach(([k, [label, color]]) => {
+    if (!counts[k] && k !== "manual") return;
+    if (k === "manual") return;
+    const cb = h("input", { type: "checkbox", checked: items.some(it => it.auto === k && it.cut === k) });
+    cb.addEventListener("change", () => { items.forEach(it => { if (it.auto === k) it.cut = cb.checked ? k : null; }); sync(); });
+    catBox.append(h("label", { class: "chip", style: `border-color:${color}55` }, cb, h("span", { style: `width:8px;height:8px;border-radius:50%;background:${color};display:inline-block` }), label, h("span", { class: "muted" }, String(counts[k]))));
+  });
+  // pause settings
+  const s0 = plan.settings || {};
+  const pauseCb = h("input", { type: "checkbox", checked: s0.pauses !== false });
+  const maxP = h("input", { type: "number", step: "0.05", value: s0.max_pause ?? "", style: "width:80px;padding:4px 8px" });
+  const keepP = h("input", { type: "number", step: "0.05", value: s0.keep_pause ?? "", style: "width:80px;padding:4px 8px" });
+  [pauseCb, maxP, keepP].forEach(e => e.addEventListener("input", markDirty));
+  const pauseRow = h("div", { class: "row", style: "margin-bottom:12px;font-size:13px" },
+    h("label", { class: "check" }, pauseCb, "缩短长停顿"), h("span", { class: "muted" }, "超过"), maxP, h("span", { class: "muted" }, "秒的停顿缩短到"), keepP, h("span", { class: "muted" }, "秒"),
+    h("span", { class: "muted" }, `（当前 ${(plan.pause_edits || []).length} 处）`));
+  card.append(h("div", { class: "hint", style: "margin-bottom:8px" }, "划线 = 将被剪掉。单击文字切换删除 / 保留（被删的片段整段恢复），双击试听原音频的这一处。"), catBox, pauseRow);
+
+  const view = h("div", { style: "line-height:2.2;font-size:16px;max-height:520px;overflow:auto;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2)" });
+  card.append(view);
+  let stopAt = null;
+  srcPlayer.addEventListener("timeupdate", () => { if (stopAt != null && srcPlayer.currentTime >= stopAt) { srcPlayer.pause(); stopAt = null; } });
+  const audition = it => { srcPlayer.currentTime = Math.max(0, it.start - 0.8); stopAt = it.end + 0.8; srcPlayer.play(); };
+  const order = items.map((it, i) => i).sort((a, b) => items[a].start - items[b].start);
+  function render() {
+    view.innerHTML = "";
+    let lastLine = null, lineEl = null;
+    for (const i of order) {
+      const it = items[i];
+      if (!it.island && it.line !== lastLine) {
+        lineEl = h("div", {}, h("span", { class: "muted", style: "font:11px var(--mono);margin-right:10px" }, fmt(it.start)));
+        view.append(lineEl); lastLine = it.line;
+      }
+      if (!lineEl) { lineEl = h("div"); view.append(lineEl); }
+      const color = it.cut ? (RC_REASONS[it.cut] || ["", "#e03131"])[1] : null;
+      const el = h("span", {
+        title: `${fmt(it.start)}–${fmt(it.end)}${it.cut ? " · " + (RC_REASONS[it.cut]?.[0] || it.cut) : ""}`,
+        style: (it.cut ? `text-decoration:line-through;text-decoration-color:${color};text-decoration-thickness:2px;color:${color};background:${color}14;` : "") +
+          (it.island ? "font-size:12px;border:1px dashed var(--line-strong);border-radius:6px;padding:0 5px;margin:0 3px;" : "") + "cursor:pointer;border-radius:4px",
+      }, it.text + (it.space_after ? " " : ""));
+      el.addEventListener("click", () => {
+        if (it.cut) {          // restore the whole contiguous cut run
+          const k = order.indexOf(i), reason = it.cut;
+          let a = k, b = k;
+          while (a > 0 && items[order[a - 1]].cut === reason && !items[order[a - 1]].island) a--;
+          while (b < order.length - 1 && items[order[b + 1]].cut === reason && !items[order[b + 1]].island) b++;
+          for (let q = a; q <= b; q++) items[order[q]].cut = null;
+          if (it.island) it.cut = null;
+        } else it.cut = it.auto || "manual";
+        sync();
+      });
+      el.addEventListener("dblclick", e => { e.preventDefault(); audition(it); });
+      lineEl.append(el);
+    }
+  }
+  const original = JSON.stringify(items.map(it => it.cut));
+  const dirty = h("span", { class: "badge warn", style: "display:none" }, "有未生成的修改");
+  function markDirty() { dirty.style.display = JSON.stringify(items.map(it => it.cut)) !== original || pauseCb.checked !== (s0.pauses !== false) || String(maxP.value) !== String(s0.max_pause ?? "") || String(keepP.value) !== String(s0.keep_pause ?? "") ? "" : "none"; }
+  const msg = h("span", { style: "font-size:12.5px" });
+  const go = h("button", { class: "btn primary", type: "button", onclick: async () => {
+    go.disabled = true; msg.textContent = "提交中…";
+    try {
+      const settings = { pauses: pauseCb.checked, max_pause: maxP.value ? parseFloat(maxP.value) : null, keep_pause: keepP.value ? parseFloat(keepP.value) : null };
+      const r = await fetch(`/api/jobs/${j.id}/roughcut`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cuts: items.map(it => it.cut), settings }) });
+      const d = await r.json();
+      if (!r.ok) { msg.textContent = d.detail || "提交失败"; return; }
+      store.set("last." + task, d.id); store.set("tab", "review");
+      showJob(d.id, box, task);
+    } catch (e) { msg.textContent = "提交失败：" + e; } finally { go.disabled = false; }
+  } }, ico("scissors"), "按当前选择重新生成");
+  card.append(h("div", { class: "row", style: "margin-top:14px" }, go, dirty, msg,
+    h("span", { class: "hint" }, "只重新渲染，不会重新识别，几秒钟完成")));
+  render();
+  return card;
 }
 
 function filesView(files, audios, jsonF) {
   const wrap = h("div");
   const card = h("div", { class: "card" }, h("h3", {}, ico("download"), `输出文件`, h("span", { class: "badge" }, String(files.length))));
   card.append(h("div", { class: "tbl" }, h("table", { class: "files" }, h("tbody", {}, files.map(f => h("tr", {},
-    h("td", {}, h("span", { class: "fname" }, ico(f.kind === "audio" ? "audio" : "file"), f.name)), h("td", { class: "muted", style: "white-space:nowrap;width:90px" }, fmtSize(f.size)),
+    h("td", {}, h("span", { class: "fname" }, ico(f.kind === "audio" ? "audio" : f.kind === "video" ? "video" : "file"), f.name)), h("td", { class: "muted", style: "white-space:nowrap;width:90px" }, fmtSize(f.size)),
     h("td", {}, h("div", { class: "row", style: "justify-content:flex-end;gap:4px;flex-wrap:nowrap" },
       h("a", { class: "btn small", href: f.url, download: f.name.split("/").pop() }, ico("download"), "下载"), h("a", { class: "btn small ghost", href: f.url, target: "_blank" }, "打开")))))))));
   if (files.some(f => f.kind === "binary")) card.append(h("p", { class: "hint", style: "margin:10px 0 0" }, "加密 .krc 为二进制文件，可下载后在「格式转换」中读回验证。"));
   wrap.append(card);
+  const videos = files.filter(f => f.kind === "video");
+  if (videos.length) wrap.append(h("div", { class: "card" }, h("h3", {}, ico("video"), "视频"),
+    videos.map(v => h("div", { class: "field" }, h("label", {}, v.name), h("video", { controls: true, preload: "metadata", src: v.url, style: "width:100%;max-height:420px;background:#000;border-radius:10px" })))));
   if (audios.length) wrap.append(h("div", { class: "card" }, h("h3", {}, ico("audio"), "音轨试听"),
     h("div", { class: "grid", style: "grid-template-columns:repeat(auto-fill,minmax(280px,1fr))" }, audios.map(a => h("div", { class: "field" }, h("label", {}, a.name), h("audio", { controls: true, preload: "none", src: a.url }))))));
   const texts = files.filter(f => f.kind === "text" || f.kind === "json" || f.kind === "markdown");

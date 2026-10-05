@@ -164,6 +164,8 @@ def _file_kind(p: Path) -> str:
     ext = p.suffix.lower()
     if ext in (".wav", ".flac", ".mp3", ".m4a", ".ogg"):
         return "audio"
+    if ext in (".mp4", ".mkv", ".mov", ".webm", ".m4v"):
+        return "video"
     if ext == ".krc" and not p.name.endswith(".krc.txt"):
         return "binary"
     if ext == ".json":
@@ -232,7 +234,7 @@ def _worker() -> None:
 
 
 # ------------------------------------------------------------------ helpers
-TASKS = ("align", "lyrics", "separate", "convert", "translate", "proofread")
+TASKS = ("align", "lyrics", "separate", "roughcut", "convert", "translate", "proofread")
 
 
 def _allowed_flags(task: str) -> set:
@@ -275,7 +277,7 @@ async def create_job(task: str = Form(...), args: str = Form("[]"), media: Optio
 
     # --- primary input
     media_path: Optional[Path] = None
-    if task in ("align", "lyrics", "separate"):
+    if task in ("align", "lyrics", "separate", "roughcut"):
         if media is not None and media.filename:
             media_path = await _save_upload(media, wd / "input")
         elif sample:
@@ -297,7 +299,7 @@ async def create_job(task: str = Form(...), args: str = Form("[]"), media: Optio
         name = Path(text_name or ("script.txt" if task in ("align", "lyrics") else "input.srt")).name
         text_path = wd / "input" / name
         text_path.write_text(text_content, encoding="utf-8")
-    if task == "align" and text_path:
+    if task in ("align", "roughcut") and text_path:
         argv += ["--script", str(text_path)]
     elif task == "lyrics" and text_path:
         argv += ["--lyrics", str(text_path)]
@@ -362,7 +364,7 @@ def _add_flags(task: str, argv: List[str], pairs: List[list], wd: Path, glossary
         else:
             argv += ["--style", str(sp)]
     # the page previews the json output of alignments
-    if task in ("align", "lyrics", "convert") and "-f" in argv:
+    if task in ("align", "lyrics", "convert", "roughcut") and "-f" in argv:
         i = argv.index("-f")
         fl = argv[i + 1].split(",")
         if "json" not in fl:
@@ -681,6 +683,53 @@ def apply_style(job_id: str, body: Dict[str, Any] = Body(...)):
     (job.workdir / "job.json").write_text(json.dumps({**job.to_dict(), "argv": job.argv}, ensure_ascii=False, indent=2),
                                           encoding="utf-8")
     return {"ass": text, "target": tgt["ass"], "written": written}
+
+
+@app.post("/api/jobs/{job_id}/roughcut")
+def roughcut_apply(job_id: str, body: Dict[str, Any] = Body(...)):
+    """Render a rough cut again with reviewed decisions.
+
+    ``body.cuts``: the decision for every plan item (reason string or null), in plan order;
+    ``body.settings``: optional pause settings.  Detection / recognition is not repeated.
+    """
+    parent = _load_job(job_id)
+    if parent is None or parent.task != "roughcut":
+        raise HTTPException(404, "job not found")
+    plan_file = next(iter(sorted((parent.workdir / "output").glob("*.roughcut.json"))), None)
+    if plan_file is None:
+        raise HTTPException(400, "原任务没有剪辑计划")
+    plan = json.loads(plan_file.read_text(encoding="utf-8"))
+    cuts = body.get("cuts")
+    if not isinstance(cuts, list) or len(cuts) != len(plan["items"]):
+        raise HTTPException(400, "cuts 与剪辑计划不匹配")
+    for it, c in zip(plan["items"], cuts):
+        it["cut"] = c if c else None
+    st = body.get("settings") or {}
+    plan.setdefault("settings", {})
+    for k in ("pauses", "max_pause", "keep_pause", "min_gap", "crossfade_ms"):
+        if k in st and st[k] is not None:
+            plan["settings"][k] = st[k]
+    src_media = Path(parent.argv[1]) if len(parent.argv) > 1 else None
+    if src_media is None or not src_media.exists():
+        src_media = next((f for f in sorted((parent.workdir / "input").glob("*")) if f.suffix.lower() in MEDIA_EXT), None)
+    if src_media is None:
+        raise HTTPException(400, "原任务的音频已不存在")
+    wd = _new_workdir()
+    media = wd / "input" / src_media.name
+    shutil.copy(src_media, media)
+    pf = wd / "input" / "edited.roughcut.json"
+    pf.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+    meta_p = parent.meta or {}
+    # settings now come from the plan; recognition / detection flags are irrelevant
+    drop = {"--no-pauses", "--max-pause", "--keep-pause", "--min-gap", "--crossfade-ms", "--llm"}
+    pairs = [p for p in meta_p.get("pairs", []) if p and p[0] not in drop]
+    if st.get("pauses") is False:
+        pairs.append(["--no-pauses", True])
+    argv = _add_flags("roughcut", ["roughcut", str(media), "--plan", str(pf)], pairs, wd,
+                      "", meta_p.get("style_json", ""))
+    meta = {k: v for k, v in meta_p.items() if k not in ("_command", "style_edit")}
+    meta.update(pairs=pairs, parent=parent.id, edited=True, media=meta_p.get("media"))
+    return _enqueue("roughcut", argv, wd, meta)
 
 
 @app.post("/api/models/free")
