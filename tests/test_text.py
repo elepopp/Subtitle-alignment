@@ -44,3 +44,29 @@ def test_transfer_times_interpolates_unmatched():
     starts = [t.start for t in ref]
     assert starts == sorted(starts)
     assert ref[4].start >= ref[3].end - 1e-9  # interpolated "去"
+
+
+def test_repeated_chorus_aligns_to_the_right_repeat():
+    # songs repeat whole sections; when ASR garbles the first pass and gets the repeat right,
+    # the longest exact block is "section (script, 1st) == section (heard, 2nd)" - a global
+    # alignment must still pair 1st with 1st and 2nd with 2nd
+    section = list("暖暖的午后闪过一片片粉红的衣裳淡淡相思都写在脸上沉沉离别背在肩上")
+    garbled = [("晨" if i % 4 == 0 or i == len(section) - 1 else c) for i, c in enumerate(section)]
+    ref = section + section
+    hyp = garbled + section
+    ops = align_keys(ref, hyp)
+    assert not [o for o in ops if o.op in ("del", "ins")]
+    assert all(o.ref == o.hyp for o in ops)
+
+
+def test_guess_language_and_credit_lines():
+    from subalign.text.tokenize import guess_language, is_credit_line
+
+    assert guess_language("春天的黄昏 请你陪我到") == "zh"
+    assert guess_language("きみの名前を呼んだ") == "ja"
+    assert guess_language("사랑해요 정말로") == "ko"
+    assert guess_language("I walk this empty street on the boulevard") == "en"
+    md = {"artist": "江珊", "title": "梦里水乡"}
+    assert is_credit_line("作词：洛兵") and is_credit_line("Composed by: Someone")
+    assert is_credit_line("江珊 -梦里水乡", md, 0)
+    assert not is_credit_line("春天的黄昏", md, 3) and not is_credit_line("一 - 二", md, 0)

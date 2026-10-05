@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass
 from typing import Dict, List, Optional, Sequence
 
 from ..align.sequence import AlignOp, align_tokens, error_rate, transfer_times
+from ..align.timing import fill_missing_times
 from ..llm import LLMClient, LLMError
 from ..models import Document, Line, Token
 from ..text.tokenize import tokenize
@@ -178,7 +179,19 @@ def _rewrite_lines(doc: Document, texts: Sequence[str]) -> Document:
         new_toks = tokenize(txt)
         if not new_toks:
             continue
-        transfer_times(new_toks, ln.tokens)
+        start, end = ln.start, ln.end
+        transfer_times(new_toks, ln.tokens, interpolate=False)
+        # interpolate untimed tokens inside the original cue (line-level input such as
+        # SRT has no token times at all), and never move the cue itself
+        bounds = []
+        if start is not None:
+            bounds.append(Token("", start, start))
+        bounds += new_toks
+        if end is not None:
+            bounds.append(Token("", end, end))
+        fill_missing_times(bounds)
         ln.tokens = new_toks
         ln.update_bounds()
+        if start is not None and end is not None:
+            ln.start, ln.end = start, end
     return doc

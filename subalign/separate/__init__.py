@@ -10,6 +10,7 @@ Backends (``backend="auto"`` tries them in this order):
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -74,6 +75,13 @@ def separate(input_path, out_dir, backend: str = "auto", stems: Iterable[str] = 
                 y = load_audio(src, sr=sr, mono=False)
                 save_audio(dst, y, sr)
         result[s] = dst
+    # drop the backend's temp folder (demucs_* / uvr_* created inside out_dir)
+    for src in raw.values():
+        if isinstance(src, Path):
+            for parent in src.parents:
+                if parent.parent == out_dir and parent.name.startswith(("demucs_", "uvr_")):
+                    shutil.rmtree(parent, ignore_errors=True)
+                    break
     return result
 
 
@@ -95,7 +103,8 @@ def _sep_uvr(input_path, out_dir: Path, model: Optional[str]) -> Dict[str, Path]
     from audio_separator.separator import Separator  # type: ignore
 
     tmp = Path(tempfile.mkdtemp(prefix="uvr_", dir=out_dir))
-    sep = Separator(output_dir=str(tmp), output_format="WAV")
+    kw = {"model_file_dir": os.environ["SUBALIGN_UVR_MODEL_DIR"]} if os.environ.get("SUBALIGN_UVR_MODEL_DIR") else {}
+    sep = Separator(output_dir=str(tmp), output_format="WAV", **kw)
     sep.load_model(model_filename=model or "model_bs_roformer_ep_317_sdr_12.9755.ckpt")
     files = [Path(f) if Path(f).is_absolute() else tmp / f for f in sep.separate(str(input_path))]
     found: Dict[str, Path] = {}

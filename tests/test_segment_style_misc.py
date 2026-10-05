@@ -66,6 +66,17 @@ def test_glossary_and_fillers_keep_times():
     assert ln.start >= 0.5
 
 
+def test_rewrite_line_level_cues_keeps_cue_times():
+    from subalign.formats import read_text
+
+    doc = read_text("1\n00:00:05,000 --> 00:00:07,000\n字幕对其很好\n")
+    apply_glossary(doc, {"对其": "对齐"})
+    ln = doc.lines[0]
+    assert ln.text == "字幕对齐很好"
+    assert (ln.start, ln.end) == (5.0, 7.0)
+    assert all(5.0 <= t.start <= t.end <= 7.0 for t in ln.tokens)
+
+
 def test_parse_json_loose():
     assert parse_json_loose('Sure!\n```json\n{"a": 1}\n```') == {"a": 1}
     assert parse_json_loose('result: {"a": [1]} done') == {"a": [1]}
