@@ -22,6 +22,12 @@ class Segment:
     end: float
     text: str
     words: List[Word] = field(default_factory=list)
+    avg_logprob: Optional[float] = None       # Whisper decoder confidence (hallucination screening)
+    no_speech_prob: Optional[float] = None
+
+
+# initial prompt that makes Whisper write disfluencies down (嗯/呃/repeats) instead of tidying them
+DISFLUENCY_PROMPT = "嗯，呃，那个，我们我们，就是说，额，啊，这个这个。"
 
 
 @dataclass

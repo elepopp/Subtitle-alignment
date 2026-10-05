@@ -56,7 +56,8 @@ class FasterWhisperBackend(ASRBackend):
         for s in segs:
             words = [Word(w.word, float(w.start), float(w.end), float(getattr(w, "probability", 1.0)))
                      for w in (s.words or [])]
-            out.append(Segment(float(s.start), float(s.end), s.text, words))
+            out.append(Segment(float(s.start), float(s.end), s.text, words,
+                               avg_logprob=getattr(s, "avg_logprob", None), no_speech_prob=getattr(s, "no_speech_prob", None)))
         return Transcript(out, getattr(info, "language", language))
 
 
@@ -77,7 +78,8 @@ class WhisperBackend(ASRBackend):
         for s in res.get("segments", []):
             words = [Word(w["word"], float(w["start"]), float(w["end"]), float(w.get("probability", 1.0)))
                      for w in s.get("words", [])]
-            out.append(Segment(float(s["start"]), float(s["end"]), s["text"], words))
+            out.append(Segment(float(s["start"]), float(s["end"]), s["text"], words,
+                               avg_logprob=s.get("avg_logprob"), no_speech_prob=s.get("no_speech_prob")))
         return Transcript(out, res.get("language", language))
 
 

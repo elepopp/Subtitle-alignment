@@ -140,7 +140,7 @@ PROOF_SCHEMA = {
 
 
 def llm_proofread(doc: Document, client: LLMClient, context: str = "", glossary: Optional[Dict[str, str]] = None,
-                  batch_size: int = 60, punctuate: bool = True) -> Document:
+                  batch_size: int = 60, punctuate: bool = True, verbatim: bool = False) -> Document:
     what = "song lyrics recognised from singing" if doc.kind == "song" else "speech transcribed by ASR"
     system = (
         f"You proofread {what}. Fix recognition errors only: wrong homophones or near-homophones, "
@@ -149,6 +149,9 @@ def llm_proofread(doc: Document, client: LLMClient, context: str = "", glossary:
         "Return one line per id, same ids, same order. "
         'Reply with JSON only: {"lines": [{"id": <id>, "text": "<corrected>"}]}'
     )
+    if verbatim:
+        system += ("\n\nThis is a verbatim transcript: keep fillers (嗯, 呃, um, uh), repetitions, false starts "
+                   "and unfinished words exactly as they are.")
     if context:
         system += f"\n\nTopic / background: {context}"
     if glossary:

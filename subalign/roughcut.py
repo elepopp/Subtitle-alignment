@@ -43,13 +43,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .asr.base import DISFLUENCY_PROMPT as FILLER_PROMPT  # Whisper keeps 嗯/呃 with this prompt
 from .models import Document, Line, Token
 from .text.tokenize import is_cjk, normalize_key
 
 log = logging.getLogger("subalign")
 
-# makes Whisper write disfluencies down instead of cleaning them up
-FILLER_PROMPT = "嗯，呃，那个，我们我们，就是说，额，啊，这个这个。"
 
 _ALWAYS = ["嗯", "呃", "额", "唔", "嗯嗯", "呃呃", "额额", "um", "uh", "erm", "uhm", "hmm", "mm", "er", "ah"]
 LEVELS: Dict[str, Dict[str, Any]] = {

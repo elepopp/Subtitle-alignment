@@ -56,6 +56,8 @@ class PipelineConfig:
     glossary: Dict[str, str] = field(default_factory=dict)
     remove_fillers: bool = False
     metadata: Dict[str, str] = field(default_factory=dict)
+    diarize: bool = False                 # speaker labels (CAM++ embeddings + clustering)
+    speakers: Optional[int] = None        # known number of speakers
 
 
 def postprocess(doc: Document, cfg: PipelineConfig) -> Document:
@@ -64,7 +66,8 @@ def postprocess(doc: Document, cfg: PipelineConfig) -> Document:
     if cfg.remove_fillers:
         remove_fillers(doc, doc.language or "zh")
     if cfg.llm_proofread:
-        llm_proofread(doc, cfg.llm.client(), context=cfg.proofread_context, glossary=cfg.glossary or None)
+        llm_proofread(doc, cfg.llm.client(), context=cfg.proofread_context, glossary=cfg.glossary or None,
+                      verbatim=cfg.align.verbatim)
     if cfg.glossary:
         apply_glossary(doc, cfg.glossary)
     return doc
@@ -105,6 +108,31 @@ def export_all(doc: Document, out_dir: Union[str, Path], basename: str, cfg: Pip
     return written
 
 
+def asr_report_md(notes: Dict) -> str:
+    def ts(t):
+        m = int(t // 60)
+        return f"{m:02d}:{t - 60 * m:05.2f}"
+
+    rows = ["# 识别质检报告", ""]
+    hall = notes.get("hallucinations") or []
+    if hall:
+        rows += [f"## 疑似幻觉（识别模型凭空写出的文字）：{sum(h['action'] == 'removed' for h in hall)} 处已删除，"
+                 f"{sum(h['action'] == 'flagged' for h in hall)} 处待核对", ""]
+        for h in hall:
+            act = "已删除" if h["action"] == "removed" else "待核对"
+            rows.append(f"- [{ts(h['start'])}] {act}：「{h['text']}」 —— {'；'.join(h['reasons'])}")
+        rows.append("")
+    dis = notes.get("disagreements") or []
+    if dis:
+        rows += [f"## 两个识别模型不一致：{len(dis)} 处（对照模型 {notes.get('cross_check')}）", ""]
+        kinds = {"homophone": "同音/近音", "different": "不同", "missing": "对照模型没听到", "extra": "对照模型多听到"}
+        for d in dis:
+            rows.append(f"- [{ts(d['start'])}] {kinds.get(d['kind'], d['kind'])}：「{d['text'] or '（无）'}」 / "
+                        f"「{d['other'] or '（无）'}」")
+        rows.append("")
+    return "\n".join(rows)
+
+
 def run(audio: Union[str, Path], script: Optional[str] = None, out_dir: Union[str, Path, None] = None,
         cfg: Optional[PipelineConfig] = None) -> Dict:
     cfg = cfg or PipelineConfig()
@@ -115,6 +143,14 @@ def run(audio: Union[str, Path], script: Optional[str] = None, out_dir: Union[st
     doc = res.document
     doc.metadata.update(cfg.metadata)
     postprocess(doc, cfg)
+    if cfg.diarize and doc.lines:
+        from .diarize import diarize
+
+        try:
+            n = diarize(doc, res.stems.get("vocals", audio), n_speakers=cfg.speakers, device=cfg.align.device)
+            log.info("diarisation: %d speaker(s)", n)
+        except Exception as e:
+            log.warning("speaker diarisation failed: %s", e)
     client = cfg.llm.client() if cfg.translate_to else None
     files = export_all(doc, out_dir, audio.stem, cfg, translate_client=client)
     if res.report is not None:
@@ -125,5 +161,9 @@ def run(audio: Union[str, Path], script: Optional[str] = None, out_dir: Union[st
         (out_dir / f"{audio.stem}.proofread.json").write_text(
             json.dumps(res.report, ensure_ascii=False, indent=2), encoding="utf-8")
         files.append(rp)
+    if res.asr_notes.get("hallucinations") or res.asr_notes.get("disagreements"):
+        qp = out_dir / f"{audio.stem}.asr-report.md"
+        qp.write_text(asr_report_md(res.asr_notes), encoding="utf-8")
+        files.append(qp)
     return {"mode": res.mode, "anchors": res.anchor_source, "files": [str(f) for f in files],
             "stems": {k: str(v) for k, v in res.stems.items()}, "lines": len(doc.lines)}

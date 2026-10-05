@@ -57,6 +57,20 @@ subalign roughcut talk.mp4 --plan output/talk.roughcut.json   # 按审阅后的�
 subalign formats   # 列出全部格式、样式预设和画面布局
 ```
 
+## 高精度逐字稿
+
+```bash
+subalign align talk.mp4 --mode speech --lang zh --diarize --cross-check funasr \
+    --context "AI 访谈，嘉宾张伟" -f transcript,docx,srt,json
+```
+
+- **两遍得到逐字时间**：先由识别模型写出文字，再用 CTC 把这些文字强制对齐到音频，得到每个字的起点（约 ±40 ms）；对齐结果和识别模型自己给出的时间核对，差距过大就退回识别时间。只用识别时间时，停顿会被放到错误的位置。
+- **识别提示**：`--context` 和术语表里的人名、术语会作为提示交给识别模型；`--verbatim`（严格逐字）让 Whisper 保留嗯/呃、重复和半句重说，大模型校对时也会保留这些内容。
+- **幻觉过滤**：对每一段识别结果综合打分，依据有：字幕署名 / 频道宣传语、该时段有没有人声、循环重复、语速异常、识别置信度。分数够高的直接删除，处于边缘的标为待核对，都写进 `.asr-report.md`。实测能删掉「优优独播剧场——YoYo Television Series Exclusive」这类凭空出现的文字。`--keep-hallucinations` 关闭自动删除。
+- **说话人区分**：`--diarize`（或 `--speakers N`）用 CAM++ 声纹（3D-Speaker，经 ModelScope 下载，无需申请权限）加聚类；一行里如果换了说话人，会按停顿把这一行拆开。
+- **双模型交叉核对**：`--cross-check funasr` 用第二个识别模型再识别一遍。两者不一致的字会被标为低置信度（网页里用橙色标出，Word 里黄色高亮），并列在质检报告和逐字稿末尾，人工只需检查这些地方。
+- **逐字稿格式**：`transcript`（Markdown）和 `docx`（Word），按说话人分段，每段带时间戳。
+
 ## 语音粗剪
 
 `subalign roughcut` 识别并剪掉口播中的冗余部分，同时保证剪完听起来连贯：

@@ -200,6 +200,10 @@ details.sec[open]>summary.sec-title{margin-bottom:12px}
 .kara .ln.cur{background:var(--accent-weak)}
 .kara .t{color:var(--faint);font:11.5px var(--mono);flex:none;width:84px}
 .kara .txt{font-size:18px;letter-spacing:.5px;line-height:1.6}
+.kara .t{display:flex;flex-direction:column;gap:3px}
+.spk{display:inline-block;width:max-content;font:600 10.5px var(--font);padding:0 7px;border-radius:999px;color:#fff;background:#5b5bd6}
+.spk[data-s=S2]{background:#0c8599}.spk[data-s=S3]{background:#e8590c}.spk[data-s=S4]{background:#c2255c}.spk[data-s=S5]{background:#2f9e44}
+.md.transcript p{font-size:14.5px;line-height:1.85;margin:2px 0 12px}
 .kara .tr{display:block;font-size:13px;color:var(--muted);letter-spacing:0}
 .kara .tok{position:relative;background-image:linear-gradient(90deg,var(--sung) var(--p,0%),currentColor var(--p,0%));
   -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:var(--text)}
@@ -339,7 +343,12 @@ const F = {
   noProof: { flag: "--no-proofread", type: "check", label: "跳过稿件差异报告" },
   translate: { flag: "--translate", type: "select", label: "翻译为 (大模型)", opts: TO_LANGS },
   llmProof: { flag: "--llm-proofread", type: "check", label: "大模型纠错 (无稿件时)" },
-  context: { flag: "--context", type: "text", label: "背景信息 (校对用)", placeholder: "AI 技术分享，嘉宾：张三" },
+  context: { flag: "--context", type: "text", label: "背景信息（识别提示 + 校对）", placeholder: "AI 技术分享，嘉宾：张三", hint: "人名、术语、主题会提示给识别模型，也给大模型校对用" },
+  verbatim: { flag: "--verbatim", type: "check", label: "严格逐字（保留嗯/呃、重复）" },
+  diarize: { flag: "--diarize", type: "check", label: "区分说话人" },
+  speakers: { flag: "--speakers", type: "number", label: "说话人数", placeholder: "自动", hint: "知道人数时填写，区分更准" },
+  crossCheck: { flag: "--cross-check", type: "select", label: "双模型交叉核对", opts: [["", "不核对"], ["funasr", "FunASR Paraformer"], ["faster-whisper", "faster-whisper"], ["whisper", "openai-whisper"]], hint: "用第二个模型再识别一遍，不一致处标出来留给人工检查" },
+  keepHall: { flag: "--keep-hallucinations", type: "check", label: "保留疑似幻觉文字（不自动删除）" },
   fillers: { flag: "--remove-fillers", type: "check", label: "去除语气词 嗯/呃/um" },
   title: { flag: "--title", type: "text", label: "标题" },
   artist: { flag: "--artist", type: "text", label: "歌手" },
@@ -391,15 +400,15 @@ const TASKS = {
   align: {
     nav: "语音对齐", icon: "🎙", title: "语音对齐 align", desc: "口播 / 视频：自动识别或按稿件逐字对齐，输出字幕；有稿件时生成校对报告。",
     media: true, sample: "speech", text: { label: "稿件 (可选)", hint: "每行一条字幕；也可上传 .txt/.srt/.lrc 等", name: "script.txt" },
-    basic: ["mode", "lang", "asr", "asrModel", "ctc", "device"],
-    adv: ["ctcModel", "separation", "sepModel", "noRefine", "noProof", "fillers", "title", "artist", "album"],
-    llm: ["translate", "llmProof", "context"], glossary: true, export: true, defaultFormats: ["srt", "ass", "vtt", "json"],
+    basic: ["mode", "lang", "asr", "asrModel", "verbatim", "diarize", "speakers", "ctc"],
+    adv: ["crossCheck", "keepHall", "device", "ctcModel", "separation", "sepModel", "noRefine", "noProof", "fillers", "title", "artist", "album"],
+    llm: ["translate", "llmProof", "context"], glossary: true, export: true, defaultFormats: ["srt", "ass", "vtt", "json", "transcript", "docx"],
   },
   lyrics: {
     nav: "歌词对齐", icon: "🎵", title: "歌词对齐 lyrics", desc: "歌曲：人声分离 + 音高/起音检测 + 全局 DP，逐字 + 逐行对齐，导出各平台歌词格式。",
     media: true, sample: "song", text: { label: "歌词 (可选，不填则识别)", hint: "txt / lrc / qrc / krc / yrc / ttml …", name: "lyrics.txt" },
     basic: ["lang", "asr", "asrModel", "ctc", "separation", "device"],
-    adv: ["ctcModel", "sepModel", "noRefine", "noProof", "title", "artist", "album"],
+    adv: ["crossCheck", "keepHall", "ctcModel", "sepModel", "noRefine", "noProof", "title", "artist", "album"],
     llm: ["translate", "llmProof", "context"], glossary: true, export: true,
     defaultFormats: ["lrc", "lrc-enhanced", "ass", "srt", "qrc", "krc", "yrc", "ttml", "json"],
   },
@@ -838,10 +847,26 @@ async function outputTabs(j, box, task) {
   }
   const assFiles = files.filter(f => /\.ass$/i.test(f.name));
   if (assFiles.length) tabs.push({ key: "ass", label: "特效字幕", icon: "sparkles", build: () => assPreviewCard(assFiles, j, audios) });
-  const md = files.find(f => f.kind === "markdown");
-  if (md) tabs.push({ key: "report", label: j.task === "roughcut" ? "剪辑报告" : "校对报告", icon: "report", build: async () => {
-    const t = await (await fetch(md.url)).text();
-    return h("div", { class: "card" }, h("h3", {}, ico("report"), j.task === "roughcut" ? "剪辑明细" : "稿件与实际语音的差异"), h("div", { class: "md", html: miniMd(t) }));
+  const trF = files.find(f => /\.transcript\.md$/.test(f.name));
+  if (trF) tabs.push({ key: "transcript", label: "逐字稿", icon: "file", build: async () => {
+    const t = await (await fetch(trF.url)).text();
+    const docx = files.find(f => /\.docx$/.test(f.name));
+    return h("div", { class: "card" }, h("h3", {}, ico("file"), "逐字稿",
+      h("a", { class: "btn small", href: trF.url, download: trF.name.split("/").pop() }, ico("download"), "Markdown"),
+      docx ? h("a", { class: "btn small", href: docx.url, download: docx.name.split("/").pop() }, ico("download"), "Word") : null),
+      h("div", { class: "md transcript", html: miniMd(t) }));
+  } });
+  const reports = files.filter(f => f.kind === "markdown" && f !== trF);
+  const titles = { "proofread.md": "稿件与实际语音的差异", "asr-report.md": "识别质检：疑似幻觉 / 两个模型不一致", "roughcut.md": "剪辑明细" };
+  if (reports.length) tabs.push({ key: "report", label: j.task === "roughcut" ? "剪辑报告" : "报告",
+    badge: reports.some(f => /asr-report/.test(f.name)) ? "质检" : null, badgeCls: "warn", icon: "report", build: async () => {
+    const wrap = h("div");
+    for (const f of reports) {
+      const t = await (await fetch(f.url)).text();
+      const k = Object.keys(titles).find(x => f.name.endsWith(x));
+      wrap.append(h("div", { class: "card" }, h("h3", {}, ico("report"), titles[k] || f.name), h("div", { class: "md", html: miniMd(t) })));
+    }
+    return wrap;
   } });
   if (files.length) tabs.push({ key: "files", label: "输出文件", icon: "download", badge: String(files.length), build: () => filesView(files, audios, jsonF) });
   return tabs;
@@ -1013,7 +1038,7 @@ function karaokeCard(doc, j, audios, name) {
     });
     if (l.translation) txt.append(h("span", { class: "tr" }, l.translation));
     const row = h("div", { class: "ln", onclick: () => { if (audio && l.start != null) { audio.currentTime = Math.max(0, l.start - 0.3); audio.play(); } } },
-      h("span", { class: "t" }, fmtT(l.start)), txt);
+      h("span", { class: "t" }, fmtT(l.start), l.speaker ? h("span", { class: "spk", "data-s": l.speaker }, l.speaker) : null), txt);
     row._l = l; list.append(row);
   });
   card.append(list);
@@ -1332,6 +1357,8 @@ function miniMd(t) {
       out += (inTable ? "" : "<table>") + `<tr>${cells}</tr>`; inTable = true; continue;
     }
     if (inTable) { out += "</table>"; inTable = false; }
+    if (/^-{3,}\s*$/.test(raw)) { out += `<hr style="border:0;border-top:1px solid var(--line);margin:14px 0">`; continue; }
+    if (/^> /.test(raw)) { out += `<p class="muted" style="margin:0 0 14px">${l.slice(5)}</p>`; continue; }
     if (/^#{1,3} /.test(raw)) out += `<h3>${l.replace(/^#+ /, "")}</h3>`;
     else if (/^[-*] /.test(raw)) out += `<div>• ${l.slice(2).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`(.+?)`/g, "<code>$1</code>")}</div>`;
     else if (raw.trim()) out += `<p style="margin:4px 0">${l.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`(.+?)`/g, "<code>$1</code>")}</p>`;
