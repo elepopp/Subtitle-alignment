@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, Dict, Optional, Union
 
 from ..models import Document
-from . import ass, lyrics, subtitle, ttml
+from . import ass, lyrics, subtitle, transcript, ttml
 
 
 def write_json(doc: Document, **_) -> str:
@@ -56,6 +56,10 @@ FORMATS: Dict[str, Format] = {f.name: f for f in [
            description="TTML line timing"),
     Format("sbv", ".sbv", "line", subtitle.write_sbv, subtitle.read_sbv, description="YouTube SBV"),
     Format("txt", ".txt", "line", subtitle.write_txt, subtitle.read_txt, description="plain text"),
+    Format("transcript", ".transcript.md", "line", transcript.write_transcript_md, None,
+           description="逐字稿 Markdown：按说话人分段，带时间戳"),
+    Format("docx", ".docx", "line", transcript.write_transcript_docx, None, binary=True,
+           description="逐字稿 Word：按说话人分段，待核对处高亮"),
     Format("json", ".json", "word", write_json, read_json, description="full subalign document"),
 ]}
 

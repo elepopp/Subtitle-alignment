@@ -68,6 +68,14 @@ def _add_align(p: argparse.ArgumentParser, song: bool) -> None:
     g.add_argument("--context", default="", help="topic / names to help LLM proofreading")
     g.add_argument("--glossary", help='JSON file {"wrong or source term": "correct term"}')
     g.add_argument("--remove-fillers", action="store_true", help="drop 嗯/呃/um/uh ...")
+    g = p.add_argument_group("transcript quality (recognition mode)")
+    g.add_argument("--verbatim", action="store_true", help="strict verbatim: keep 嗯/呃, repeats and false starts")
+    g.add_argument("--cross-check", metavar="BACKEND",
+                   help="transcribe again with a second ASR backend and mark every disagreement for review")
+    g.add_argument("--diarize", action="store_true", help="label speakers (S1, S2, ...)")
+    g.add_argument("--speakers", type=int, help="number of speakers (implies --diarize)")
+    g.add_argument("--keep-hallucinations", action="store_true",
+                   help="do not remove text the recogniser wrote over music / silence")
     g.add_argument("--title")
     g.add_argument("--artist")
     g.add_argument("--album")
@@ -103,14 +111,18 @@ def cmd_align(a, song: bool = False) -> int:
     from .align.aligner import AlignConfig
     from .pipeline import PipelineConfig, run
 
+    glossary = json.loads(Path(a.glossary).read_text(encoding="utf-8")) if a.glossary else {}
+    # names / terms help the recogniser too (Whisper initial prompt)
+    hint = "，".join(x for x in [a.context.strip()] + list(dict.fromkeys(glossary.values())) if x)
     cfg = PipelineConfig(
         align=AlignConfig(mode="song" if song else a.mode, language=a.lang, asr_backend=a.asr,
                           asr_model=a.asr_model, ctc=a.ctc, ctc_model=a.ctc_model, separation=a.separation,
                           separation_model=a.separation_model, refine=not a.no_refine,
-                          proofread=not a.no_proofread, device=a.device),
+                          proofread=not a.no_proofread, device=a.device, verbatim=a.verbatim, asr_prompt=hint,
+                          screen_hallucinations=not a.keep_hallucinations, cross_check=a.cross_check),
         export=_export_cfg(a), llm=_llm_cfg(a), translate_to=a.translate, llm_proofread=a.llm_proofread,
-        proofread_context=a.context, remove_fillers=a.remove_fillers,
-        glossary=json.loads(Path(a.glossary).read_text(encoding="utf-8")) if a.glossary else {},
+        proofread_context=a.context, remove_fillers=a.remove_fillers, glossary=glossary,
+        diarize=a.diarize or bool(a.speakers), speakers=a.speakers,
         metadata={k: v for k, v in (("title", a.title), ("artist", a.artist), ("album", a.album)) if v})
     script = _read_script(getattr(a, "lyrics", None) if song else a.script)
     res = run(a.audio, script, a.out, cfg)

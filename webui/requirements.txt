@@ -21,6 +21,8 @@ audio-separator[gpu]
 # Chinese text
 pypinyin>=0.49
 jieba>=0.42
+# transcript export (Word)
+python-docx
 # LLM
 anthropic>=0.60
 # web test console

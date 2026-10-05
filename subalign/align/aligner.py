@@ -50,6 +50,11 @@ class AlignConfig:
     proofread: bool = True              # with a script, also run ASR to report differences
     device: Optional[str] = None
     chunk_units: int = 400
+    # ---- recognition (no script) quality
+    verbatim: bool = False              # keep 嗯/呃/repeats: Whisper is prompted not to tidy them
+    asr_prompt: str = ""                # names / terms / topic given to the recogniser as a hint
+    screen_hallucinations: bool = True  # drop text written over music / silence (asr.hallucination)
+    cross_check: Optional[str] = None   # second ASR backend; disagreements are marked for review
 
 
 @dataclass
@@ -60,6 +65,8 @@ class AlignResult:
     report: Optional[Dict] = None
     stems: Dict[str, Path] = field(default_factory=dict)
     transcript: Optional[Any] = None
+    # recognition quality notes: {"hallucinations": [...], "disagreements": [...], "cross_check": name}
+    asr_notes: Dict[str, Any] = field(default_factory=dict)
 
 
 # ------------------------------------------------------------------ helpers
@@ -156,6 +163,7 @@ def align_audio(audio_path: Union[str, Path], script: Union[None, str, Document]
     params = SONG_PARAMS if mode == "song" else SPEECH_PARAMS
 
     doc = _as_document(script)
+    asr_notes: Dict[str, Any] = {}
     credits: List[Tuple[int, Line]] = []
     transcript = None
     report = None
@@ -168,7 +176,19 @@ def align_audio(audio_path: Union[str, Path], script: Union[None, str, Document]
         from ..asr import transcript_to_document
 
         asr = _get_asr(cfg)
-        transcript = asr.transcribe(str(analysis_path), language=cfg.language, **cfg.asr_options)
+        opts = dict(cfg.asr_options)
+        prompt = _recognition_prompt(cfg)
+        if prompt and "prompt" not in opts:
+            opts["prompt"] = prompt
+        transcript = asr.transcribe(str(analysis_path), language=cfg.language, **opts)
+        if cfg.screen_hallucinations:
+            from ..asr.hallucination import screen
+
+            transcript, notes = screen(transcript, feats, song=mode == "song")
+            if notes:
+                asr_notes["hallucinations"] = notes
+                log.warning("ASR: %d likely hallucinated segment(s) removed, %d flagged",
+                            sum(n["action"] == "removed" for n in notes), sum(n["action"] == "flagged" for n in notes))
         doc = transcript_to_document(transcript, kind=mode)
         doc.language = cfg.language or transcript.language
         if mode == "song":
@@ -177,6 +197,29 @@ def align_audio(audio_path: Union[str, Path], script: Union[None, str, Document]
             t.confidence = min(t.confidence, 0.9)
         anchor_source = "asr"
         _set_anchors_from_times(doc, sigma=0.12 if mode == "speech" else 0.2)
+        # second pass: CTC forced alignment of the recognised text.  ASR word times are coarse and
+        # put pauses in the wrong places; CTC onsets are ~±40 ms.  Checked against the ASR times.
+        emitter = _try_ctc(cfg, doc.language) if any(True for _ in doc.tokens()) else None
+        if emitter is not None:
+            toks = list(doc.tokens())
+            saved = [(t.start, t.end, t.confidence, _get_anchor(t)) for t in toks]
+            quality = _anchors_from_ctc(doc, emitter, y)
+            pairs = [(t, s[0]) for t, s in zip(toks, saved) if _get_anchor(t) is not None]
+            problem = "no aligned units" if not np.isfinite(quality) else _disagreement(doc, pairs, "ASR timestamps")
+            if problem:
+                log.warning("CTC alignment of the transcript rejected (%s); keeping ASR timings", problem)
+                for t, (a, b, c, anc) in zip(toks, saved):
+                    t.start, t.end, t.confidence = a, b, c
+                    setattr(t, _ANCHOR, anc)
+            else:
+                # units CTC could not place keep their ASR anchor
+                for t, (a, b, c, anc) in zip(toks, saved):
+                    if _get_anchor(t) is None and anc is not None:
+                        setattr(t, _ANCHOR, anc)
+                        t.start, t.end = a, b
+                    if c < 0.5:      # the recogniser itself was unsure of this word: keep that visible
+                        t.confidence = min(t.confidence, c)
+                anchor_source = "asr+ctc"
     else:
         doc.kind = mode
         doc.language = doc.language or cfg.language or guess_language("\n".join(ln.text for ln in doc.lines))
@@ -235,8 +278,69 @@ def align_audio(audio_path: Union[str, Path], script: Union[None, str, Document]
             orig = [i for i in range(n_sung + len(credits)) if i not in drop]
             for it in report.get("issues", []):
                 it["line"] = orig[min(it["line"], len(orig) - 1)]
+    if cfg.cross_check and script is None and doc.lines:
+        try:
+            asr_notes.update(_cross_check(doc, cfg, str(analysis_path)))
+        except Exception as e:  # the second opinion is optional
+            log.warning("cross-check with %s failed: %s", cfg.cross_check, e)
+    if asr_notes.get("disagreements"):
+        doc.metadata["review"] = [{"start": d["start"], "end": d["end"], "text": d["text"], "other": d["other"]}
+                                  for d in asr_notes["disagreements"]]
     return AlignResult(document=doc, mode=mode, anchor_source=anchor_source, report=report, stems=stems,
-                       transcript=transcript)
+                       transcript=transcript, asr_notes=asr_notes)
+
+
+def _recognition_prompt(cfg: AlignConfig) -> str:
+    """Initial prompt for the recogniser: disfluency style (verbatim) + the user's names / terms."""
+    parts = []
+    if cfg.verbatim:
+        from ..asr.base import DISFLUENCY_PROMPT
+
+        parts.append(DISFLUENCY_PROMPT)
+    if cfg.asr_prompt.strip():
+        parts.append(cfg.asr_prompt.strip())
+    return " ".join(parts)[:400]
+
+
+def _cross_check(doc: Document, cfg: AlignConfig, audio: str) -> Dict[str, Any]:
+    """Transcribe again with a second backend; every place the two disagree is marked
+    (confidence lowered, listed) so a human checks exactly those spots."""
+    from ..asr import get_backend, transcript_tokens
+
+    kw: Dict[str, Any] = {}
+    if cfg.device and cfg.cross_check in ("faster-whisper", "whisper", "funasr"):
+        kw["device"] = cfg.device
+    other = get_backend(cfg.cross_check, **kw).transcribe(audio, language=doc.language)
+    hyp = transcript_tokens(other)
+    ref = [t for ln in doc.lines for t in ln.tokens]
+    ops = align_tokens(ref, hyp)
+    out: List[Dict[str, Any]] = []
+    run: List = []
+
+    def flush():
+        if not run:
+            return
+        r_idx = [o.ref for o in run if o.ref is not None]
+        h_txt = "".join(hyp[o.hyp].text for o in run if o.hyp is not None)
+        homophone = all(o.op == "sub" and o.sim >= 0.5 for o in run)
+        if r_idx:
+            for i in r_idx:
+                ref[i].confidence = min(ref[i].confidence, 0.45 if homophone else 0.3)
+            out.append({"start": ref[r_idx[0]].start, "end": ref[r_idx[-1]].end,
+                        "text": "".join(ref[i].text for i in r_idx), "other": h_txt,
+                        "kind": "homophone" if homophone else ("missing" if not h_txt else "different")})
+        elif h_txt.strip():
+            near = next((ref[o.ref] for o in ops[ops.index(run[0]):] if o.ref is not None), ref[-1])
+            out.append({"start": near.start, "end": near.start, "text": "", "other": h_txt, "kind": "extra"})
+        run.clear()
+
+    for o in ops:
+        if o.op == "match":
+            flush()
+        else:
+            run.append(o)
+    flush()
+    return {"cross_check": cfg.cross_check, "disagreements": out}
 
 
 # ------------------------------------------------------------------ anchors
