@@ -14,6 +14,11 @@ if not exist tools\ollama\ollama.exe (
   curl -L -o tools\ollama.zip https://github.com/ollama/ollama/releases/download/v0.35.1/ollama-windows-amd64.zip || goto :err
   tar -xf tools\ollama.zip -C tools\ollama && del tools\ollama.zip
 )
+if not exist tools\ffmpeg\bin\ffmpeg.exe (
+  rem a release ffmpeg for the audio chain (nightly builds have crashed in the RNNoise filter)
+  curl -L -o tools\ffmpeg.zip https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-8.1.zip || goto :err
+  tar -xf tools\ffmpeg.zip -C tools && del tools\ffmpeg.zip && move tools\ffmpeg-n8.1-latest-win64-gpl-8.1 tools\ffmpeg
+)
 .venv\Scripts\python.exe webui\download_models.py || goto :err
 echo 完成。运行 start.bat 打开测试台。
 pause

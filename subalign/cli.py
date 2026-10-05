@@ -238,6 +238,26 @@ def cmd_roughcut(a) -> int:
     return 0
 
 
+def cmd_studio(a) -> int:
+    from .studio import StudioConfig, process
+
+    cfg = StudioConfig(
+        cleanup=a.cleanup, fillers=not a.no_fillers, breaths=a.breaths, breath_reduce_db=a.breath_reduce,
+        coughs=not a.keep_coughs, pauses=a.shorten_pauses, extra_fillers=tuple(_csv(a.fillers) or ()), language=a.lang,
+        highpass=a.highpass, denoise=a.denoise, declick=not a.no_declick, plosives=not a.no_plosives, deess=a.deess,
+        eq=not a.no_eq, mud_gain=a.mud, presence_gain=a.presence, air_gain=a.air,
+        compress=not a.no_compress, comp_threshold=a.comp_threshold, comp_ratio=a.comp_ratio,
+        reverb=a.reverb, bgm_ratio=a.bgm_ratio, bgm_duck=not a.no_duck,
+        loudness=None if a.loudness is not None and a.loudness >= 0 else a.loudness, true_peak=a.true_peak,
+        format=a.format, bitrate=a.bitrate, bit_depth=a.bit_depth, out_sr=a.sample_rate, channels=a.channels)
+    out = a.out or str(Path(a.audio).parent / "output")
+    res = process(Path(a.audio), Path(out), cfg, bgm_path=Path(a.bgm) if a.bgm else None, asr_backend=a.asr,
+                  asr_model=a.asr_model, device=a.device)
+    print(json.dumps({"files": [str(f) for f in res["files"]], "steps": res["report"]["steps"],
+                      "input": res["report"]["input"], "output": res["report"]["output"]}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_formats(_a) -> int:
     from .formats import FORMATS
     from .segment.layout import LAYOUTS
@@ -344,6 +364,48 @@ def build_parser() -> argparse.ArgumentParser:
     _add_export(s)
     _add_llm(s)
     s.set_defaults(func=cmd_roughcut)
+
+    s = sub.add_parser("studio", help="voice-over processing: cleanup, repair, EQ, dynamics, BGM, loudness, export")
+    s.add_argument("audio")
+    s.add_argument("-o", "--out")
+    s.add_argument("--bgm", help="background music file mixed under the voice")
+    g = s.add_argument_group("cleanup (edits the timeline)")
+    g.add_argument("--cleanup", action="store_true", help="remove breaths / coughs / fillers")
+    g.add_argument("--no-fillers", action="store_true", help="cleanup without recognition (breaths / coughs only)")
+    g.add_argument("--breaths", default="reduce", choices=["off", "reduce", "remove"])
+    g.add_argument("--breath-reduce", type=float, default=12.0, help="dB a breath is turned down by")
+    g.add_argument("--keep-coughs", action="store_true")
+    g.add_argument("--shorten-pauses", action="store_true")
+    g.add_argument("--fillers", help="extra filler words, comma separated")
+    g.add_argument("--lang")
+    g.add_argument("--asr", default="auto")
+    g.add_argument("--asr-model")
+    g.add_argument("--device")
+    g = s.add_argument_group("repair / tone / dynamics")
+    g.add_argument("--highpass", type=float, default=80.0, help="low cut (Hz), 0 = off")
+    g.add_argument("--denoise", default="medium", choices=["off", "light", "medium", "strong"])
+    g.add_argument("--no-declick", action="store_true")
+    g.add_argument("--no-plosives", action="store_true")
+    g.add_argument("--deess", type=float, default=6.0, help="max de-ess reduction (dB), 0 = off")
+    g.add_argument("--no-eq", action="store_true")
+    g.add_argument("--mud", type=float, default=-3.0, help="dB at ~250 Hz")
+    g.add_argument("--presence", type=float, default=2.5, help="dB at ~3 kHz")
+    g.add_argument("--air", type=float, default=0.0, help="dB high shelf at 10 kHz")
+    g.add_argument("--no-compress", action="store_true")
+    g.add_argument("--comp-threshold", type=float, default=-20.0)
+    g.add_argument("--comp-ratio", type=float, default=3.0)
+    g.add_argument("--reverb", type=float, default=0.0, help="wet amount 0..1 (0.1-0.2 = light)")
+    g.add_argument("--bgm-ratio", type=float, default=0.2, help="BGM loudness relative to the voice (0.15-0.25)")
+    g.add_argument("--no-duck", action="store_true", help="no extra BGM dip under speech")
+    g = s.add_argument_group("loudness / export")
+    g.add_argument("--loudness", type=float, default=-16.0, help="target LUFS (e.g. -14, -16, -18, -23); 0 = off")
+    g.add_argument("--true-peak", type=float, default=-1.5)
+    g.add_argument("--format", default="wav", choices=["wav", "mp3", "aac", "flac", "opus"])
+    g.add_argument("--bitrate", default="320k")
+    g.add_argument("--bit-depth", type=int, default=24, choices=[16, 24, 32])
+    g.add_argument("--sample-rate", type=int, default=48000)
+    g.add_argument("--channels", type=int, default=2, choices=[1, 2])
+    s.set_defaults(func=cmd_studio)
 
     s = sub.add_parser("formats", help="list formats, style presets and layouts")
     s.set_defaults(func=cmd_formats)

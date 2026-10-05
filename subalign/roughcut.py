@@ -61,7 +61,7 @@ LEVELS: Dict[str, Dict[str, Any]] = {
                        max_pause=0.6, keep_pause=0.3, island_max=1.5),
 }
 REASONS = {"filler": "语气词", "repeat": "重复 / 口吃", "retake": "重录句", "unrecognized": "未识别发声",
-           "llm": "大模型标记", "manual": "手动", "pause": "长停顿"}
+           "llm": "大模型标记", "manual": "手动", "pause": "长停顿", "breath": "气口", "cough": "咳嗽"}
 
 
 @dataclass
@@ -81,6 +81,10 @@ class RoughCutConfig:
     extra_fillers: Sequence[str] = ()
     keep_words: Sequence[str] = ()
     llm: bool = False
+    breaths: str = "off"                     # off | reduce (turn down) | remove (cut)
+    breath_reduce_db: float = 12.0
+    coughs: bool = False
+    acoustic_only: bool = False              # no recognition: voiced chunks are the units
 
     def resolved(self) -> Dict[str, Any]:
         lv = dict(LEVELS.get(self.level, LEVELS["standard"]))
@@ -285,7 +289,7 @@ def detect(items: List[Item], cfg: RoughCutConfig, feats=None, llm_client=None) 
 
 def _islands(items: List[Item], feats, max_len: float, enabled: bool) -> List[Item]:
     hop = feats.hop_s
-    act = feats.active > 0.5
+    act = _voiced(feats)          # an untranscribed 嗯/呃 has pitch; breaths and coughs do not
     cover = np.zeros(feats.n, dtype=bool)
     for it in items:
         if it.key:
@@ -308,6 +312,115 @@ def _islands(items: List[Item], feats, max_len: float, enabled: bool) -> List[It
                             auto="unrecognized" if enabled else None))
         i = j
     return out
+
+
+def _runs(mask: np.ndarray, merge: int) -> List[Tuple[int, int]]:
+    """Contiguous True runs (half-open), bridging gaps of up to ``merge`` False frames."""
+    out: List[Tuple[int, int]] = []
+    idx = np.flatnonzero(mask)
+    if not len(idx):
+        return out
+    a = b = int(idx[0])
+    for i in idx[1:]:
+        if i - b <= merge + 1:
+            b = int(i)
+        else:
+            out.append((a, b + 1))
+            a = b = int(i)
+    out.append((a, b + 1))
+    return out
+
+
+def _voiced(feats, min_len: float = 0.09) -> np.ndarray:
+    """Steady voiced speech: active *and* periodic for at least ``min_len`` (a vowel).
+    The activity detector alone also fires on breaths (energy without pitch:
+    periodicity ~0.1-0.3 vs > 0.5 for vowels), and noise bursts such as a cough can
+    look periodic for a few frames - those short blips are not speech."""
+    from scipy.ndimage import median_filter
+
+    per = median_filter(feats.periodicity, size=7, mode="nearest")     # frame-to-frame pitch flicker
+    raw = (feats.active > 0.5) & (per > 0.45)
+    out = np.zeros_like(raw)
+    for a, b in _runs(raw, 0):
+        if (b - a) * feats.hop_s >= min_len:
+            out[a:b] = True
+    return out
+
+
+def voiced_units(feats, min_gap: float = 0.25) -> List[Item]:
+    """Acoustic-only mode: one unit per voiced chunk (gaps < ``min_gap`` bridged, so the
+    unvoiced consonants inside words stay in their unit)."""
+    hop = feats.hop_s
+    return [Item(text="▪", start=a * hop, end=b * hop, line=k, key="v")
+            for k, (a, b) in enumerate(_runs(_voiced(feats), int(min_gap / hop))) if (b - a) * hop >= 0.1]
+
+
+def breaths_and_coughs(items: List[Item], feats, cfg: "RoughCutConfig", min_pause: float = 0.3) -> List[Item]:
+    """Aperiodic (unvoiced) sounds in the *pauses* between phrases.
+
+    breath: well below the speech level, 0.12-1.0 s - an intake of air
+    cough : about as loud as speech, abrupt, 0.1-1.2 s
+    Only gaps of at least ``min_pause`` between speech chunks are searched: inside
+    words the gaps between syllables are shorter, and the unvoiced consonants there
+    (s, sh, f, aspirated t / k) are aperiodic too - they must not be touched.
+    """
+    if cfg.breaths == "off" and not cfg.coughs:
+        return []
+    hop, n = feats.hop_s, feats.n
+    db = feats.db
+    floor = float(np.percentile(db, 10))
+    voiced = _voiced(feats)
+    speech = float(np.percentile(db[voiced], 50)) if voiced.any() else float(np.percentile(db, 90))
+    # speech chunks: steady voicing (syllable gaps bridged) + every recognised unit
+    chunk = np.zeros(n, dtype=bool)
+    for a, b in _runs(voiced, int(0.25 / hop)):
+        chunk[a:b] = True
+    for it in items:
+        if it.key or it.island:
+            chunk[max(0, int(it.start / hop)):min(n, int(math.ceil(it.end / hop)))] = True
+    zone = np.zeros(n, dtype=bool)
+    for a, b in _runs(~chunk, 0):
+        if (b - a) * hop >= min_pause:
+            m = int(0.04 / hop)                            # stay clear of word edges
+            zone[a + m:max(a + m, b - m)] = True
+    cand = zone & (feats.periodicity < 0.5) & (db > floor + 6)
+    out: List[Item] = []
+    for a, b in _runs(cand, int(0.05 / hop)):
+        dur = (b - a) * hop
+        if dur < 0.1:
+            continue
+        peak, mean = float(db[a:b].max()), float(db[a:b].mean())
+        onset = float(db[a:min(b, a + 5)].max() - db[max(0, a - 5):a + 1].min())
+        if cfg.coughs and peak >= speech - 6 and dur <= 1.2 and onset >= 12:
+            out.append(Item(text=f"[咳嗽 {dur:.1f}s]", start=a * hop, end=b * hop, island=True, auto="cough"))
+        elif cfg.breaths != "off" and 0.12 <= dur <= 1.0 and mean < speech - 8:
+            out.append(Item(text=f"[气口 {dur:.1f}s]", start=a * hop, end=b * hop, island=True, auto="breath"))
+        else:
+            log.debug("aperiodic %.2f-%.2f peak %.1f mean %.1f onset %.1f (speech %.1f)", a * hop, b * hop, peak,
+                      mean, onset, speech)
+    return out
+
+
+def attenuate(y: np.ndarray, sr: int, spans: Sequence[Tuple[float, float]], db: float, ramp: float = 0.015
+              ) -> np.ndarray:
+    """Turn ``spans`` down by ``db`` with short raised-cosine ramps (breath reduction)."""
+    if not spans:
+        return y
+    g = np.ones(y.shape[-1], dtype=np.float32)
+    lo = 10 ** (-db / 20)
+    r = max(1, int(ramp * sr))
+    shape = (1 - np.cos(np.linspace(0, np.pi, r))) / 2           # 0 -> 1
+    for s, e in spans:
+        a, b = max(0, int(s * sr)), min(len(g), int(e * sr))
+        if b <= a:
+            continue
+        g[a:b] = np.minimum(g[a:b], lo)
+        a0 = max(0, a - r)
+        if a > a0:                                                # ramp down before the span
+            g[a0:a] = np.minimum(g[a0:a], 1 - (1 - lo) * shape[r - (a - a0):])
+        b1 = min(len(g), b + r)                                   # ramp back up after it
+        g[b:b1] = np.minimum(g[b:b1], lo + (1 - lo) * shape[:b1 - b])
+    return y * g
 
 
 _LLM_SYSTEM = (
@@ -752,16 +865,33 @@ def rough_cut(audio: Path, out_dir: Path, cfg: RoughCutConfig, script: Optional[
         items = [Item(**{k: v for k, v in d.items() if k in Item.__dataclass_fields__}) for d in plan["items"]]
         language = language or plan.get("language")
         s = plan.get("settings") or {}
-        for k in ("max_pause", "keep_pause", "pauses", "min_gap", "crossfade_ms", "level"):
+        for k in ("max_pause", "keep_pause", "pauses", "min_gap", "crossfade_ms", "level", "breaths",
+                  "breath_reduce_db", "acoustic_only"):
             if k in s and getattr(cfg, k) == getattr(RoughCutConfig(), k):
                 setattr(cfg, k, s[k])
+    elif cfg.acoustic_only:
+        feats16 = analyze(load_audio(audio, 16000))
+        items = voiced_units(feats16)          # every voiced chunk is a unit
+        items += breaths_and_coughs(items, feats16, cfg)
+        for it in items:
+            it.cut = it.auto
     else:
         doc = transcribe_for_cut(audio, script, language, asr_backend, asr_model, device, ctc, out_dir / "work")
         language = language or doc.language
         items = items_from_document(doc)
         acoustic_ends(items, env, env_hop)
-        items = detect(items, cfg, analyze(load_audio(audio, 16000)), llm_client)
-    keeps, fills, pause_edits = plan_cuts(items, duration, cfg, env, env_hop)
+        feats16 = analyze(load_audio(audio, 16000))
+        items = detect(items, cfg, feats16, llm_client)
+        extra = breaths_and_coughs(items, feats16, cfg)
+        for it in extra:
+            it.cut = it.auto
+        items += extra
+    # breaths to "reduce" stay in the timeline, only quieter
+    soft = {id(it) for it in items if it.cut == "breath" and cfg.breaths == "reduce"}
+    if soft:
+        y = attenuate(y, sr, [(it.start, it.end) for it in items if id(it) in soft], cfg.breath_reduce_db)
+    plan_items = [it for it in items if id(it) not in soft]
+    keeps, fills, pause_edits = plan_cuts(plan_items, duration, cfg, env, env_hop)
     room = _room_tone(y, sr, env, env_hop, items)
     r = render(y, sr, keeps, fills, room, env, env_hop, cfg)
 
@@ -793,7 +923,8 @@ def rough_cut(audio: Path, out_dir: Path, cfg: RoughCutConfig, script: Optional[
              "removed_ratio": round(1 - out_dur / max(duration, 1e-9), 4), "counts": counts,
              "seconds": {k: round(v, 2) for k, v in seconds.items()}, "joints": len(keeps) - 1}
     plan_out = {"format": "subalign-roughcut", "version": 1, "source": audio.name, "language": language,
-                "settings": {"level": cfg.level, "max_pause": cfg.resolved()["max_pause"],
+                "settings": {"level": cfg.level, "max_pause": cfg.resolved()["max_pause"], "breaths": cfg.breaths,
+                             "breath_reduce_db": cfg.breath_reduce_db, "acoustic_only": cfg.acoustic_only,
                              "keep_pause": cfg.resolved()["keep_pause"], "pauses": cfg.pauses,
                              "min_gap": cfg.min_gap, "crossfade_ms": cfg.crossfade_ms},
                 "stats": stats, "pause_edits": pause_edits, "items": [asdict(it) for it in items]}
