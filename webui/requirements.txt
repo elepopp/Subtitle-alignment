@@ -1,0 +1,31 @@
+# subalign core + every optional backend (torch / torchaudio cu124 are installed first by setup.bat)
+numpy>=1.22,<2.3
+scipy>=1.8
+soundfile>=0.12
+# ASR
+faster-whisper>=1.1
+openai-whisper
+funasr
+modelscope
+# CTC forced alignment
+transformers>=4.30,<5
+# separation: demucs is installed with --no-deps (its torchaudio<2.1 pin is stale); these are its deps
+dora-search
+einops
+julius>=0.2.3
+lameenc>=1.2
+openunmix
+pyyaml
+tqdm
+audio-separator[gpu]
+# Chinese text
+pypinyin>=0.49
+jieba>=0.42
+# LLM
+anthropic>=0.60
+# web test console
+fastapi
+uvicorn
+python-multipart
+# tests
+pytest>=7
