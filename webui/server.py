@@ -234,7 +234,8 @@ def _worker() -> None:
 
 
 # ------------------------------------------------------------------ helpers
-TASKS = ("align", "lyrics", "separate", "roughcut", "convert", "translate", "proofread")
+TASKS = ("align", "lyrics", "separate", "roughcut", "studio", "convert", "translate", "proofread")
+RECORDINGS = paths.WORK / "recordings"
 
 
 def _allowed_flags(task: str) -> set:
@@ -268,7 +269,7 @@ def index():
 async def create_job(task: str = Form(...), args: str = Form("[]"), media: Optional[UploadFile] = File(None),
                      text_file: Optional[UploadFile] = File(None), text_content: str = Form(""),
                      text_name: str = Form(""), glossary: str = Form(""), style_json: str = Form(""),
-                     sample: str = Form("")):
+                     sample: str = Form(""), recording: str = Form(""), bgm: Optional[UploadFile] = File(None)):
     if task not in TASKS:
         raise HTTPException(400, f"unknown task {task}")
     wd = _new_workdir()
@@ -277,19 +278,24 @@ async def create_job(task: str = Form(...), args: str = Form("[]"), media: Optio
 
     # --- primary input
     media_path: Optional[Path] = None
-    if task in ("align", "lyrics", "separate", "roughcut"):
+    if task in ("align", "lyrics", "separate", "roughcut", "studio"):
         if media is not None and media.filename:
             media_path = await _save_upload(media, wd / "input")
-        elif sample:
-            src = paths.WORK / "samples" / Path(sample).name
+        elif sample or recording:
+            src = (paths.WORK / "samples" / Path(sample).name) if sample else (RECORDINGS / Path(recording).name)
             if not src.exists():
-                raise HTTPException(400, "sample not found")
+                raise HTTPException(400, "sample / recording not found")
             media_path = wd / "input" / src.name
             shutil.copy(src, media_path)
         else:
             raise HTTPException(400, "请上传音频/视频文件")
         argv.append(str(media_path))
         meta["media"] = f"/jobs/{wd.name}/file/input/{media_path.name}"
+    if task == "studio" and bgm is not None and bgm.filename:
+        (wd / "input" / "bgm").mkdir(exist_ok=True)
+        bgm_path = await _save_upload(bgm, wd / "input" / "bgm")
+        argv += ["--bgm", str(bgm_path)]
+        meta["bgm"] = f"/jobs/{wd.name}/file/input/bgm/{bgm_path.name}"
 
     # --- secondary text input (script / lyrics / subtitle)
     text_path: Optional[Path] = None
@@ -730,6 +736,37 @@ def roughcut_apply(job_id: str, body: Dict[str, Any] = Body(...)):
     meta = {k: v for k, v in meta_p.items() if k not in ("_command", "style_edit")}
     meta.update(pairs=pairs, parent=parent.id, edited=True, media=meta_p.get("media"))
     return _enqueue("roughcut", argv, wd, meta)
+
+
+@app.post("/api/recordings")
+async def save_recording(file: UploadFile = File(...), name: str = Form("")):
+    """Keep a take recorded in the browser (16/24-bit WAV) for processing."""
+    RECORDINGS.mkdir(parents=True, exist_ok=True)
+    stem = "".join(c for c in (name or "录音") if c.isalnum() or c in "-_ ").strip()[:40] or "录音"
+    dst = RECORDINGS / f"{time.strftime('%Y%m%d-%H%M%S')}-{stem}.wav"
+    with open(dst, "wb") as out:
+        while True:
+            chunk = await file.read(1 << 20)
+            if not chunk:
+                break
+            out.write(chunk)
+    return {"name": dst.name, "url": f"/recordings/{dst.name}", "size": dst.stat().st_size}
+
+
+@app.get("/api/recordings")
+def list_recordings():
+    if not RECORDINGS.exists():
+        return []
+    return [{"name": f.name, "url": f"/recordings/{f.name}", "size": f.stat().st_size, "mtime": f.stat().st_mtime}
+            for f in sorted(RECORDINGS.glob("*.wav"), key=lambda f: -f.stat().st_mtime)]
+
+
+@app.get("/recordings/{name}")
+def recording_file(name: str):
+    p = RECORDINGS / Path(name).name
+    if not p.exists():
+        raise HTTPException(404)
+    return FileResponse(p)
 
 
 @app.post("/api/models/free")

@@ -3,7 +3,7 @@
     python webui/download_models.py              # everything
     python webui/download_models.py whisper ctc  # only some groups
 
-Groups: whisper, openai-whisper, ctc, demucs, uvr, funasr, llm
+Groups: whisper, openai-whisper, ctc, demucs, uvr, funasr, rnnoise, campplus, llm
 """
 from __future__ import annotations
 
@@ -69,6 +69,23 @@ def dl_funasr() -> None:
     AutoModel(model="paraformer-zh", vad_model="fsmn-vad", punc_model="ct-punc", disable_update=True)
 
 
+def dl_rnnoise() -> None:
+    import urllib.request
+
+    d = paths.MODELS / "rnnoise"
+    d.mkdir(parents=True, exist_ok=True)
+    for m in ("somnolent-hogwash-2018-09-01/sh.rnnn", "beguiling-drafter-2018-08-30/bd.rnnn"):
+        dst = d / m.split("/")[-1]
+        if not dst.exists():
+            urllib.request.urlretrieve(f"https://github.com/GregorR/rnnoise-models/raw/master/{m}", dst)
+
+
+def dl_campplus() -> None:
+    from funasr import AutoModel
+
+    AutoModel(model="cam++", disable_update=True)          # speaker embeddings for --diarize
+
+
 def dl_llm() -> None:
     from webui.ollama import ensure_server
 
@@ -83,6 +100,8 @@ GROUPS = {
     "demucs": dl_demucs,
     "uvr": dl_uvr,
     "funasr": dl_funasr,
+    "rnnoise": dl_rnnoise,
+    "campplus": dl_campplus,
     "llm": dl_llm,
 }
 

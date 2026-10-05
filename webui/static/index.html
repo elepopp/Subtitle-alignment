@@ -299,6 +299,8 @@ const ICONS = {
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
   audio: '<path d="M2 13a2 2 0 0 0 2-2V7a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0V4a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0v-4a2 2 0 0 1 2-2"/>',
   settings: '<path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
+  sliders: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+  record: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4" fill="currentColor"/>',
   scissors: '<circle cx="6" cy="6" r="3"/><path d="M8.12 8.12 12 12"/><path d="M20 4 8.12 15.88"/><circle cx="6" cy="18" r="3"/><path d="M14.8 14.8 20 20"/>',
   video: '<path d="m16 13 5.2 3.1a.5.5 0 0 0 .8-.4V8.3a.5.5 0 0 0-.8-.4L16 11"/><rect x="2" y="6" width="14" height="12" rx="2"/>',
 };
@@ -394,6 +396,36 @@ Object.assign(F, {
   rcFormat: { flag: "--format", type: "select", label: "输出音频格式", opts: [["", "同输入"], ["wav", "wav"], ["mp3", "mp3 320k"], ["flac", "flac"], ["m4a", "m4a"]] },
   rcNoVideo: { flag: "--no-video", type: "check", label: "视频输入也只输出音频" },
 });
+Object.assign(F, {
+  stCleanup: { flag: "--cleanup", type: "check", label: "智能清理（会剪辑时间线）" },
+  stFillers: { flag: "--no-fillers", type: "neg", label: "同时删口头禅（需语音识别，较慢）" },
+  stBreaths: { flag: "--breaths", type: "select", label: "气口", opts: [["reduce", "削弱（-12 dB，推荐）"], ["remove", "删除"], ["off", "保留"]] },
+  stCoughs: { flag: "--keep-coughs", type: "neg", label: "删除咳嗽" },
+  stPauses: { flag: "--shorten-pauses", type: "check", label: "缩短过长停顿" },
+  stExtra: { flag: "--fillers", type: "text", label: "额外口头禅", placeholder: "然后,对吧" },
+  stHighpass: { flag: "--highpass", type: "number", label: "低切 (Hz)", placeholder: "80", hint: "去低频隆隆声 / 桌面震动；0 关闭" },
+  stDenoise: { flag: "--denoise", type: "select", label: "降噪", opts: [["medium", "中（RNNoise，推荐）"], ["light", "轻（频谱）"], ["strong", "强（RNNoise + 频谱）"], ["off", "关"]] },
+  stDeclick: { flag: "--no-declick", type: "neg", label: "去咔哒声（口水音）" },
+  stPlosives: { flag: "--no-plosives", type: "neg", label: "去喷麦 / 爆破音" },
+  stDeess: { flag: "--deess", type: "number", label: "去齿音最大衰减 (dB)", placeholder: "6", hint: "0 关闭；齿音重可加到 8-10" },
+  stEq: { flag: "--no-eq", type: "neg", label: "EQ（去闷 + 清晰度）" },
+  stMud: { flag: "--mud", type: "number", label: "250 Hz 去闷 (dB)", placeholder: "-3", step: "0.5" },
+  stPresence: { flag: "--presence", type: "number", label: "3 kHz 清晰度 (dB)", placeholder: "2.5", step: "0.5" },
+  stAir: { flag: "--air", type: "number", label: "10 kHz 空气感 (dB)", placeholder: "0", step: "0.5" },
+  stCompress: { flag: "--no-compress", type: "neg", label: "压缩（让音量更平稳）" },
+  stCompThr: { flag: "--comp-threshold", type: "number", label: "压缩阈值 (dBFS)", placeholder: "-20" },
+  stCompRatio: { flag: "--comp-ratio", type: "number", label: "压缩比", placeholder: "3", step: "0.5" },
+  stReverb: { flag: "--reverb", type: "select", label: "混响", opts: [["0", "关"], ["0.08", "很轻"], ["0.12", "轻"], ["0.18", "中"]] },
+  stBgmRatio: { flag: "--bgm-ratio", type: "select", label: "背景音乐音量", opts: [["0.2", "人声的 20%（推荐）"], ["0.15", "人声的 15%"], ["0.25", "人声的 25%"], ["0.1", "人声的 10%"]] },
+  stDuck: { flag: "--no-duck", type: "neg", label: "说话时自动再压低音乐" },
+  stLoudness: { flag: "--loudness", type: "select", label: "响度标准", opts: [["-16", "-16 LUFS 口播 / 播客（推荐）"], ["-14", "-14 LUFS 抖音 / B站 / YouTube"], ["-18", "-18 LUFS 偏柔和"], ["-23", "-23 LUFS 广电标准"], ["0", "不做响度标准化"]] },
+  stTP: { flag: "--true-peak", type: "number", label: "真峰值上限 (dBTP)", placeholder: "-1.5", step: "0.1" },
+  stFormat: { flag: "--format", type: "select", label: "导出格式", opts: [["wav", "WAV"], ["mp3", "MP3"], ["aac", "AAC (m4a)"], ["flac", "FLAC"], ["opus", "Opus"]] },
+  stBitrate: { flag: "--bitrate", type: "select", label: "码率（有损格式）", opts: [["320k", "320 kbps"], ["256k", "256 kbps"], ["192k", "192 kbps"], ["128k", "128 kbps"]] },
+  stBitDepth: { flag: "--bit-depth", type: "select", label: "位深（WAV / FLAC）", opts: [["24", "24 bit"], ["16", "16 bit"], ["32", "32 bit 浮点"]] },
+  stSampleRate: { flag: "--sample-rate", type: "select", label: "采样率", opts: [["48000", "48 kHz（视频）"], ["44100", "44.1 kHz（音乐平台）"]] },
+  stChannels: { flag: "--channels", type: "select", label: "声道", opts: [["2", "立体声"], ["1", "单声道"]] },
+});
 const EXPORT = ["formats", "layout", "fontSize", "maxChars", "maxLines", "punct", "mono", "style"];
 
 const TASKS = {
@@ -432,6 +464,24 @@ const TASKS = {
     basic: ["rcLevel", "rcFillers", "rcRepeats", "rcRetakes", "rcUnrec", "rcPauses", "lang", "asr", "asrModel"],
     adv: ["rcMaxPause", "rcKeepPause", "rcMinGap", "rcCrossfade", "rcExtra", "rcKeep", "rcFormat", "rcNoVideo", "device"],
     llm: ["rcLLM"], export: true, defaultFormats: ["srt", "json"],
+  },
+  studio: {
+    nav: "音频处理", title: "口播音频处理 studio", desc: "去气口 / 咳嗽 / 口头禅，降噪、去咔哒、去喷麦、去齿音，EQ、压缩、响度标准化，可选混响和背景音乐，导出常见格式。",
+    media: true, sample: null, bgm: true, recordings: true,
+    sections: [
+      ["智能清理", ["stCleanup", "stFillers", "stBreaths", "stCoughs", "stPauses", "lang", "stExtra"], true],
+      ["修复", ["stHighpass", "stDenoise", "stDeclick", "stPlosives", "stDeess"], true],
+      ["音色与动态", ["stEq", "stMud", "stPresence", "stAir", "stCompress", "stCompThr", "stCompRatio", "stReverb"], false],
+      ["背景音乐", ["stBgmRatio", "stDuck"], false],
+      ["响度与导出", ["stLoudness", "stTP", "stFormat", "stBitrate", "stBitDepth", "stSampleRate", "stChannels"], true],
+    ],
+    presets: {
+      "口播标准": {},
+      "播客": { stCleanup: true, stBreaths: "reduce", stPauses: true, stLoudness: "-16", stReverb: "0", stFormat: "mp3" },
+      "轻处理": { stCleanup: false, stDenoise: "light", stDeess: "4", stMud: "-2", stPresence: "1.5", stCompThr: "-24", stCompRatio: "2" },
+      "强降噪": { stDenoise: "strong", stHighpass: "100", stDeess: "8" },
+      "短视频": { stCleanup: true, stLoudness: "-14", stPresence: "3.5", stAir: "1.5", stFormat: "aac", stBitrate: "256k" },
+    },
   },
   proofread: {
     nav: "字幕校对", icon: "✅", title: "字幕校对 proofread", desc: "大模型修正识别错误（时间轴不变），或仅用术语表 / 语气词规则。",
@@ -518,7 +568,7 @@ function save(task, state) { const { _media, _text, ...rest } = state; store.set
 
 function buildArgs(task, state) {
   const T = TASKS[task];
-  const keys = [...(T.basic || []), ...(T.adv || []), ...(T.llm || []), ...(T.export ? EXPORT : [])];
+  const keys = [...(T.basic || []), ...(T.sections || []).flatMap(x => x[1]), ...(T.adv || []), ...(T.llm || []), ...(T.export ? EXPORT : [])];
   const args = [];
   let styleJson = "";
   for (const k of keys) {
@@ -553,14 +603,15 @@ function buildArgs(task, state) {
 const PAGES = {
   status: { nav: "状态总览", icon: "dashboard", render: renderStatus },
   align: { nav: "语音对齐", icon: "mic" }, lyrics: { nav: "歌词对齐", icon: "music" }, separate: { nav: "人声分离", icon: "wave" },
-  roughcut: { nav: "语音粗剪", icon: "scissors" },
+  roughcut: { nav: "语音粗剪", icon: "scissors" }, studio: { nav: "音频处理", icon: "sliders" },
+  recorder: { nav: "录音棚", icon: "record", render: m => renderRecorder(m) },
   convert: { nav: "格式转换", icon: "convert" }, translate: { nav: "字幕翻译", icon: "translate" }, proofread: { nav: "字幕校对", icon: "check" },
   formats: { nav: "格式与样式", icon: "book", render: renderFormats },
   jobs: { nav: "任务记录", icon: "history", render: renderJobs },
   tests: { nav: "单元测试", icon: "flask", render: renderTests },
 };
 for (const k of Object.keys(TASKS)) PAGES[k].render = () => renderTask(k);
-const NAV = [["", ["status"]], ["对齐", ["align", "lyrics", "separate"]], ["剪辑", ["roughcut"]], ["字幕工具", ["convert", "translate", "proofread"]], ["系统", ["formats", "jobs", "tests"]]];
+const NAV = [["", ["status"]], ["对齐", ["align", "lyrics", "separate"]], ["录音与剪辑", ["recorder", "studio", "roughcut"]], ["字幕工具", ["convert", "translate", "proofread"]], ["系统", ["formats", "jobs", "tests"]]];
 let current = location.hash.slice(1) || store.get("page", "status");
 
 function renderNav() {
@@ -579,6 +630,7 @@ function renderNav() {
     h("div", { class: "ln" }, h("span", { class: "dot" }), h("span", {}, `subalign v${INFO?.version || "?"} · 大模型 ${LLM.provider}`))));
 }
 function go(k, keepQuery = false) {
+  if (window.__pageCleanup) { try { window.__pageCleanup(); } catch (e) {} window.__pageCleanup = null; }
   current = k; store.set("page", k); history.replaceState(null, "", (keepQuery ? location.search : location.pathname) + "#" + k);
   renderNav(); const m = $("#main"); m.innerHTML = ""; PAGES[k].render(m); window.scrollTo(0, 0);
 }
@@ -668,7 +720,7 @@ function renderTask(task) {
   ws.append(form, result);
 
   // 1 · inputs
-  let mediaFile = null, textFile = null, useSample = null, n = 0;
+  let mediaFile = null, textFile = null, useSample = null, useRecording = null, bgmFile = null, n = 0;
   const inputs = h("div", { style: "display:flex;flex-direction:column;gap:12px" });
   if (T.media) {
     const t1 = h("div", { class: "t1" }, "拖入或点击选择音频 / 视频");
@@ -687,6 +739,27 @@ function renderTask(task) {
       if (T.text && !textArea.value.trim()) textArea.value = r.text;
     } }, ico("sparkles"), "使用合成测试音频");
     inputs.append(h("div", { class: "field" }, h("label", {}, "音频 / 视频"), drop, T.sample ? h("div", { class: "row", style: "justify-content:flex-end" }, sampleBtn) : null));
+    if (T.recordings) {
+      // takes saved in the recorder (录音棚) can be processed directly
+      const recSel = h("select", {}, h("option", { value: "" }, "—— 或选择录音棚里的录音 ——"));
+      recSel.addEventListener("change", () => {
+        useRecording = recSel.value || null;
+        if (useRecording) { mediaFile = null; useSample = null; drop.classList.add("has"); t1.textContent = "录音 " + useRecording; t2.textContent = "来自录音棚"; }
+      });
+      fetch("/api/recordings").then(r => r.json()).then(list => {
+        list.forEach(x => recSel.append(h("option", { value: x.name }, `${x.name} · ${fmtSize(x.size)}`)));
+        const pre = sessionStorage.getItem("studio.recording");
+        if (pre && list.some(x => x.name === pre)) { recSel.value = pre; recSel.dispatchEvent(new Event("change")); sessionStorage.removeItem("studio.recording"); }
+      }).catch(() => {});
+      inputs.append(recSel);
+    }
+  }
+  if (T.bgm) {
+    const b1 = h("div", { class: "t1" }, "背景音乐（可选）");
+    const b2 = h("div", { class: "t2" }, "不选就只处理人声；选了会循环 / 截断到人声长度并淡入淡出");
+    const bfi = h("input", { type: "file", accept: "audio/*", style: "display:none", onchange: e => { bgmFile = e.target.files[0] || null; if (bgmFile) { bdrop.classList.add("has"); b1.textContent = bgmFile.name; b2.textContent = fmtSize(bgmFile.size) + " · 点击更换"; } } });
+    const bdrop = h("div", { class: "drop", style: "padding:12px", onclick: () => bfi.click() }, h("div", { class: "up", style: "width:30px;height:30px" }, ico("music")), b1, b2, bfi);
+    inputs.append(h("div", { class: "field" }, h("label", {}, "背景音乐"), bdrop));
   }
   let textArea = null, textName = null;
   if (T.text) {
@@ -703,9 +776,23 @@ function renderTask(task) {
   body.append(sec("输入", inputs, { n: ++n }));
 
   // 2 · main parameters
+  if (T.presets) {
+    const row = h("div", { class: "checks" }, Object.entries(T.presets).map(([name, vals]) => h("button", { class: "chip", type: "button", onclick: () => {
+      store.set("form." + task, { ...vals, _preset: name });
+      go(task);
+    } }, state._preset === name ? h("b", {}, name) : name)));
+    body.append(sec("预设", h("div", {}, row, h("div", { class: "hint", style: "margin-top:6px" }, "一键套用常见设置，之后仍可单独调整")), { n: ++n }));
+  }
+  if (T.sections) {
+    T.sections.forEach(([title, keys, open]) => {
+      const g = h("div", { class: "grid" });
+      keys.forEach(k => g.append(fieldEl(k, task, state)));
+      body.append(sec(title, g, { collapsible: true, open }));
+    });
+  }
   const opts = h("div", { class: "grid" });
   (T.basic || []).forEach(k => opts.append(fieldEl(k, task, state)));
-  body.append(sec(T.media ? "识别与对齐" : "参数", opts, { n: ++n }));
+  if (T.basic) body.append(sec(T.media ? "识别与对齐" : "参数", opts, { n: ++n }));
   if (T.adv?.length) {
     const g = h("div", { class: "grid" }); T.adv.forEach(k => g.append(fieldEl(k, task, state)));
     body.append(sec("高级参数", g, { collapsible: true }));
@@ -742,8 +829,10 @@ function renderTask(task) {
     if (T.media) {
       if (mediaFile) fd.append("media", mediaFile);
       else if (useSample) fd.append("sample", useSample);
-      else { alert("请先选择音频/视频，或使用合成测试音频"); return; }
+      else if (useRecording) fd.append("recording", useRecording);
+      else { alert("请先选择音频/视频" + (T.recordings ? "，或选择录音" : "，或使用合成测试音频")); return; }
     }
+    if (bgmFile) fd.append("bgm", bgmFile);
     if (textFile) fd.append("text_file", textFile);
     else if (textArea && textArea.value.trim()) { fd.append("text_content", textArea.value); fd.append("text_name", textName.value || T.text.name); }
     else if (T.text?.required) { alert("请上传或粘贴字幕内容"); return; }
@@ -827,6 +916,11 @@ async function outputTabs(j, box, task) {
   const tabs = [];
   const audios = files.filter(f => f.kind === "audio");
   const jsonF = files.find(f => f.kind === "json" && !f.name.includes("proofread") && !f.name.includes(".roughcut."));
+  if (j.task === "studio") {
+    const rep = files.find(f => /\.studio\.json$/.test(f.name));
+    const outA = files.find(f => /\.processed\./.test(f.name));
+    if (rep && outA) tabs.push({ key: "studio", label: "处理结果", icon: "sliders", build: () => studioCard(rep, outA, j) });
+  }
   if (j.task === "roughcut") {
     // previews play the edited media, not the source
     const cutMedia = files.find(f => f.kind === "video" && /\.cut\./.test(f.name)) || files.find(f => f.kind === "audio" && /\.cut\./.test(f.name));
@@ -870,6 +964,57 @@ async function outputTabs(j, box, task) {
   } });
   if (files.length) tabs.push({ key: "files", label: "输出文件", icon: "download", badge: String(files.length), build: () => filesView(files, audios, jsonF) });
   return tabs;
+}
+
+// ---------------------------------------------------------------- studio result
+const STEP_NAMES = { cleanup: "智能清理", lowcut: "低切", denoise: "降噪", declick: "去咔哒声", plosives: "去喷麦", deess: "去齿音",
+  eq: "EQ", compressor: "压缩", reverb: "混响", bgm: "背景音乐", loudness: "响度标准化" };
+async function studioCard(repF, outF, j) {
+  const rep = await (await fetch(repF.url)).json();
+  const inp = rep.input || {}, out = rep.output || {};
+  const card = h("div", { class: "card" });
+  const kv = (k, a, b, unit = "") => h("tr", {}, h("td", { class: "muted" }, k), h("td", {}, a == null ? "—" : `${a}${unit}`), h("td", {}, h("b", {}, b == null ? "—" : `${b}${unit}`)));
+  card.append(h("h3", {}, ico("sliders"), "处理结果", h("span", { class: "badge ok" }, `${out.lufs} LUFS · 真峰值 ${out.true_peak} dBTP`)));
+  // A / B player: one transport, switch source at the same position
+  const player = h("audio", { controls: true, preload: "metadata", src: outF.url, style: "flex:1;min-width:260px" });
+  let cur = "B";
+  const matchCb = h("input", { type: "checkbox", checked: true });
+  const gainB = Math.min(1, 10 ** (((inp.lufs ?? out.lufs) - out.lufs) / 20));
+  const applyVol = () => { player.volume = cur === "B" && matchCb.checked ? gainB : 1; };
+  const sw = which => {
+    if (which === cur) return;
+    const t = player.currentTime, playing = !player.paused;
+    cur = which; player.src = which === "A" ? j.meta.media : outF.url;
+    player.addEventListener("loadedmetadata", () => { player.currentTime = t; if (playing) player.play(); }, { once: true });
+    applyVol(); seg.querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.k === which));
+  };
+  const seg = h("div", { class: "seg", style: "margin:0" },
+    h("button", { "data-k": "A", type: "button", onclick: () => sw("A") }, "A 原始"),
+    h("button", { "data-k": "B", type: "button", class: "on", onclick: () => sw("B") }, "B 处理后"));
+  matchCb.addEventListener("change", applyVol);
+  applyVol();
+  card.append(h("div", { class: "row", style: "margin-bottom:6px" }, seg, player),
+    h("label", { class: "check", style: "margin-bottom:14px", title: "处理后通常更响；按响度对齐后再比较，判断才不会被音量误导" }, matchCb,
+      `按响度对齐对比（B 降低 ${(-20 * Math.log10(gainB || 1)).toFixed(1)} dB 播放）`));
+  card.append(h("div", { class: "split", style: "gap:14px" },
+    h("div", { class: "tbl" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "指标"), h("th", {}, "原始"), h("th", {}, "处理后"))),
+      h("tbody", {}, kv("时长", inp.duration, out.duration, " s"), kv("响度", inp.lufs, out.lufs, " LUFS"), kv("真峰值", inp.true_peak, out.true_peak, " dBTP"),
+        kv("响度范围", inp.lra, out.lra, " LU"), kv("底噪", inp.noise_floor_db, out.noise_floor_db, " dB")))),
+    h("div", { class: "tbl" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "处理步骤"), h("th", {}, "结果"))),
+      h("tbody", {}, (rep.steps || []).map(st => {
+        const { step, ...info } = st;
+        let txt = Object.entries(info).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join(" · ");
+        if (step === "denoise") txt = `${info.engine} · 底噪 ${info.noise_floor_before} → ${info.noise_floor_after} dB`;
+        if (step === "declick") txt = `修复 ${info.count} 处`;
+        if (step === "plosives") txt = `压低 ${info.count} 处低频冲击`;
+        if (step === "deess") txt = `齿音 ${info.sibilant_ms} ms，最多 -${info.max_reduction_db} dB`;
+        if (step === "loudness") txt = `${info.lufs_before} → ${info.lufs} LUFS · 真峰值 ${info.true_peak} dBTP` + (info.warning ? ` · ⚠ ${info.warning}` : "");
+        if (step === "bgm") txt = `音乐比人声低 ${-info.bgm_relative_db} dB（增益 ${info.bgm_gain_db} dB）`;
+        if (step === "cleanup") txt = `${info.duration}s → ${info.output_duration}s · ` + Object.entries(info.counts || {}).map(([k, v]) => `${({ breath: "气口", cough: "咳嗽", filler: "口头禅", pause: "停顿", unrecognized: "未识别发声" })[k] || k} ${v}`).join("、");
+        return h("tr", {}, h("td", {}, STEP_NAMES[step] || step), h("td", { class: "muted" }, txt));
+      }))))));
+  card.append(h("div", { class: "row", style: "margin-top:14px" }, h("a", { class: "btn primary", href: outF.url, download: outF.name.split("/").pop() }, ico("download"), "下载 " + outF.name.split("/").pop())));
+  return card;
 }
 
 // ---------------------------------------------------------------- rough cut review
@@ -1364,6 +1509,438 @@ function miniMd(t) {
     else if (raw.trim()) out += `<p style="margin:4px 0">${l.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`(.+?)`/g, "<code>$1</code>")}</p>`;
   }
   return out + (inTable ? "</table>" : "");
+}
+
+// ---------------------------------------------------------------- recorder (录音棚)
+// Lossless capture (AudioWorklet), punch-in re-recording with pre-roll, crossfaded joins,
+// undo / redo.  The take lives in REC across page switches (until the tab is closed).
+const REC = { chans: null, sr: 48000, ch: 1, dirty: false, undo: [], redo: [], name: "口播录音", peaks: null };
+const XFADE_S = 0.012;
+const WORKLET = `
+class RecTap extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = null; this.n = 0; this.start = 0; }
+  process(inputs) {
+    const inp = inputs[0];
+    if (!inp || !inp.length) return true;
+    const len = inp[0].length;
+    if (!this.buf) { this.buf = inp.map(() => new Float32Array(1024)); this.n = 0; this.start = currentFrame; }
+    for (let c = 0; c < inp.length && c < this.buf.length; c++) this.buf[c].set(inp[c], this.n);
+    this.n += len;
+    if (this.n >= 1024) { this.port.postMessage({ frame: this.start, data: this.buf }); this.buf = null; }
+    return true;
+  }
+}
+registerProcessor("rec-tap", RecTap);`;
+
+window.addEventListener("beforeunload", e => { if (REC.dirty) { e.preventDefault(); e.returnValue = ""; } });
+
+function recLen() { return REC.chans ? REC.chans[0].length : 0; }
+function recPeaks() {              // min / max per 256-sample block, for fast drawing
+  const B = 256, n = recLen(), nb = Math.ceil(n / B);
+  const mn = new Float32Array(nb), mx = new Float32Array(nb);
+  for (let b = 0; b < nb; b++) {
+    let lo = 1, hi = -1;
+    const end = Math.min(n, (b + 1) * B);
+    for (const ch of REC.chans) for (let i = b * B; i < end; i++) { const v = ch[i]; if (v < lo) lo = v; if (v > hi) hi = v; }
+    mn[b] = lo; mx[b] = hi;
+  }
+  REC.peaks = { B, mn, mx };
+}
+function recReplace(a, b, ins, record = true) {
+  // channels <- old[0:a] + ins + old[b:]; returns the removed audio for undo
+  const removed = REC.chans.map(ch => ch.slice(a, b));
+  REC.chans = REC.chans.map((ch, c) => {
+    const out = new Float32Array(ch.length - (b - a) + ins[c].length);
+    out.set(ch.subarray(0, a), 0); out.set(ins[c], a); out.set(ch.subarray(b), a + ins[c].length);
+    return out;
+  });
+  if (record) { REC.undo.push({ a, removed, ins }); REC.redo = []; }
+  REC.dirty = true;
+  recPeaks();
+  return removed;
+}
+function crossfadeInto(ins, old, a, b) {
+  // equal-power crossfades: at the start the original audio after `a` fades out under the
+  // take; at the end the take fades out into the original audio before `b`
+  const n = ins[0].length, x = Math.min(Math.round(XFADE_S * REC.sr), Math.floor(n / 3));
+  if (x < 2) return ins;
+  const oldLen = old[0].length;
+  return ins.map((t, c) => {
+    const o = old[c], out = t.slice();
+    if (a > 0 && a + x <= oldLen)
+      for (let i = 0; i < x; i++) { const w = i / x; out[i] = t[i] * Math.sin(w * Math.PI / 2) + o[a + i] * Math.cos(w * Math.PI / 2); }
+    if (b < oldLen && b - x >= 0)
+      for (let i = 0; i < x; i++) { const w = i / x, k = n - x + i; out[k] = t[k] * Math.cos(w * Math.PI / 2) + o[b - x + i] * Math.sin(w * Math.PI / 2); }
+    return out;
+  });
+}
+function encodeWav(chans, sr, bits) {
+  const n = chans[0].length, ch = chans.length, bps = bits / 8;
+  const buf = new ArrayBuffer(44 + n * ch * bps), v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + n * ch * bps, true); w(8, "WAVE"); w(12, "fmt "); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, ch, true); v.setUint32(24, sr, true); v.setUint32(28, sr * ch * bps, true);
+  v.setUint16(32, ch * bps, true); v.setUint16(34, bits, true); w(36, "data"); v.setUint32(40, n * ch * bps, true);
+  let o = 44;
+  for (let i = 0; i < n; i++) for (let c = 0; c < ch; c++) {
+    let s = Math.max(-1, Math.min(1, chans[c][i]));
+    if (bits === 16) { v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true); o += 2; }
+    else { const x = Math.round(s < 0 ? s * 0x800000 : s * 0x7fffff); v.setUint8(o, x & 255); v.setUint8(o + 1, (x >> 8) & 255); v.setUint8(o + 2, (x >> 16) & 255); o += 3; }
+  }
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+async function renderRecorder(m) {
+  m.append(pageHead("录音棚", "选择麦克风录音；空格键录制 / 停止，回车播放；选中一段后按空格只重录这一段（带预卷，接缝自动交叉淡化）。"));
+  const st = Object.assign({ device: "", sr: 48000, ch: 1, bits: 24, preroll: 1.5 }, store.get("rec", {}));
+  const saveSt = () => store.set("rec", st);
+  let ctx = null, stream = null, node = null, srcNode = null, sink = null;
+  let mode = "idle";                 // idle | preroll | recording | playing
+  let take = null, takeStart = 0, recFrame = 0, punch = null;
+  let cursor = 0, sel = null, view = { start: 0, span: 0 }, play = null, peakDb = -90, clip = false;
+
+  // ---- controls
+  const devSel = h("select", {}, h("option", { value: "" }, "默认麦克风"));
+  const srSel = h("select", {}, [[48000, "48 kHz"], [44100, "44.1 kHz"]].map(([v, l]) => h("option", { value: v, selected: +st.sr === v }, l)));
+  const chSel = h("select", {}, [[1, "单声道"], [2, "立体声"]].map(([v, l]) => h("option", { value: v, selected: +st.ch === v }, l)));
+  const bitsSel = h("select", {}, [[24, "24 bit"], [16, "16 bit"]].map(([v, l]) => h("option", { value: v, selected: +st.bits === v }, l)));
+  const preSel = h("select", {}, [[0, "无预卷"], [1, "预卷 1 秒"], [1.5, "预卷 1.5 秒"], [2, "预卷 2 秒"], [3, "预卷 3 秒"]].map(([v, l]) => h("option", { value: v, selected: +st.preroll === v }, l)));
+  const meterBar = h("div", { style: "height:100%;width:0;background:linear-gradient(90deg,#12a150,#12a150 70%,#e0a33a 85%,#d92d20);border-radius:4px;transition:width .05s" });
+  const meter = h("div", { style: "flex:1;min-width:160px;height:10px;background:var(--surface-3);border-radius:4px;overflow:hidden" }, meterBar);
+  const meterTxt = h("span", { class: "muted", style: "font:12px var(--mono);width:110px" }, "-∞ dBFS");
+  const enableBtn = h("button", { class: "btn", type: "button" }, ico("mic"), "启用麦克风");
+  const setup = h("div", { class: "card" }, h("h3", {}, ico("settings"), "录音设置"),
+    h("div", { class: "grid", style: "grid-template-columns:repeat(auto-fill,minmax(160px,1fr))" },
+      h("div", { class: "field", style: "grid-column:span 2" }, h("label", {}, "录音设备"), devSel),
+      h("div", { class: "field" }, h("label", {}, "采样率"), srSel), h("div", { class: "field" }, h("label", {}, "声道"), chSel),
+      h("div", { class: "field" }, h("label", {}, "保存位深"), bitsSel), h("div", { class: "field" }, h("label", {}, "重录预卷"), preSel)),
+    h("div", { class: "row", style: "margin-top:12px" }, enableBtn, h("span", { class: "muted", style: "font-size:12px" }, "输入电平"), meter, meterTxt),
+    h("div", { class: "hint", style: "margin-top:6px" }, "已关闭浏览器的回声消除 / 降噪 / 自动增益，录到的是原始信号；说话时峰值在 -12 ~ -6 dBFS 最合适，变红说明削波了。"));
+  m.append(setup);
+
+  // ---- editor
+  const canvas = h("canvas", { style: "width:100%;height:200px;display:block;cursor:text;border-radius:8px" });
+  const ruler = h("canvas", { style: "width:100%;height:20px;display:block" });
+  const clock = h("span", { style: "font:600 20px var(--mono);min-width:150px" }, "00:00.000");
+  const info = h("span", { class: "muted", style: "font-size:12.5px" });
+  const recBtn = h("button", { class: "btn", type: "button", title: "空格", style: "color:#d92d20" }, ico("record"), h("span", {}, "录音"));
+  const playBtn = h("button", { class: "btn", type: "button", title: "回车" }, ico("play"), h("span", {}, "播放"));
+  const btn = (label, title, fn, icon) => h("button", { class: "btn small", type: "button", title, onclick: fn }, icon ? ico(icon) : null, label);
+  const editor = h("div", { class: "card" }, h("h3", {}, ico("audio"), "录音", info),
+    h("div", { style: "border:1px solid var(--line);border-radius:10px;background:var(--surface-2);padding:6px" }, ruler, canvas),
+    h("div", { class: "row", style: "margin-top:12px" }, recBtn, playBtn, clock,
+      h("span", { class: "sp", style: "flex:1" }),
+      btn("全部", "显示整段", () => { view = { start: 0, span: Math.max(recLen(), REC.sr * 10) }; draw(); }),
+      btn("放大", "Ctrl + 滚轮", () => zoom(0.5)), btn("缩小", "", () => zoom(2)),
+      btn("撤销", "Ctrl+Z", undo), btn("重做", "Ctrl+Y", redo),
+      btn("删除选区", "Delete", delSel), btn("清空", "", clearAll)),
+    h("div", { class: "hint", style: "margin-top:8px" },
+      "快捷键：空格 录音/停止（停止即暂停，可回放后继续） · 回车 播放/停止 · 点击波形放光标 · 拖动选区 · Shift+点击扩展选区 · Esc 取消录音/选区 · Delete 删除选区 · Ctrl+Z / Ctrl+Y · Home / End"));
+  m.append(editor);
+
+  // ---- save
+  const nameIn = h("input", { type: "text", value: REC.name, style: "max-width:240px" });
+  nameIn.addEventListener("input", () => { REC.name = nameIn.value; });
+  const msg = h("span", { style: "font-size:12.5px" });
+  const list = h("div");
+  const saveCard = h("div", { class: "card" }, h("h3", {}, ico("download"), "保存"),
+    h("div", { class: "row" }, h("span", { class: "muted" }, "名称"), nameIn,
+      h("button", { class: "btn", type: "button", onclick: () => saveLocal() }, ico("download"), "下载 WAV"),
+      h("button", { class: "btn", type: "button", onclick: () => upload(false) }, "保存到录音列表"),
+      h("button", { class: "btn primary", type: "button", onclick: () => upload(true) }, ico("sliders"), "保存并送去音频处理"), msg),
+    list);
+  m.append(saveCard);
+
+  // ---- audio engine
+  async function open() {
+    try {
+      if (ctx) close();
+      ctx = new AudioContext({ sampleRate: +st.sr, latencyHint: "interactive" });
+      if (REC.chans && REC.sr !== ctx.sampleRate) { alert(`当前录音是 ${REC.sr} Hz，请先清空再换采样率`); st.sr = REC.sr; srSel.value = REC.sr; close(); return open(); }
+      REC.sr = ctx.sampleRate; REC.ch = +st.ch;
+      stream = await navigator.mediaDevices.getUserMedia({ audio: {
+        deviceId: st.device ? { exact: st.device } : undefined, channelCount: { ideal: REC.ch },
+        echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+      await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" })));
+      srcNode = ctx.createMediaStreamSource(stream);
+      node = new AudioWorkletNode(ctx, "rec-tap", { channelCount: REC.ch, channelCountMode: "explicit", numberOfOutputs: 1 });
+      sink = ctx.createGain(); sink.gain.value = 0;               // keeps the worklet pulled, silently
+      srcNode.connect(node); node.connect(sink); sink.connect(ctx.destination);
+      node.port.onmessage = e => onChunk(e.data);
+      if (!REC.chans) REC.chans = Array.from({ length: REC.ch }, () => new Float32Array(0));
+      const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "audioinput");
+      devSel.innerHTML = "";
+      devs.forEach(d => devSel.append(h("option", { value: d.deviceId, selected: d.deviceId === st.device }, d.label || "麦克风 " + d.deviceId.slice(0, 6))));
+      enableBtn.style.display = "none";
+      info.textContent = `${REC.sr / 1000} kHz · ${REC.ch === 1 ? "单声道" : "立体声"}`;
+      if (!view.span) view = { start: 0, span: Math.max(recLen(), REC.sr * 10) };
+      draw();
+    } catch (e) { alert("无法打开麦克风：" + e.message); }
+  }
+  function close() {
+    try { stream && stream.getTracks().forEach(t => t.stop()); ctx && ctx.close(); } catch (e) {}
+    ctx = stream = node = srcNode = sink = null;
+  }
+  function onChunk({ frame, data }) {
+    let pk = 0;
+    for (const ch of data) for (let i = 0; i < ch.length; i++) { const v = Math.abs(ch[i]); if (v > pk) pk = v; }
+    peakDb = Math.max(20 * Math.log10(pk + 1e-9), peakDb - 1.5);
+    if (pk >= 0.999) clip = true;
+    if (mode === "preroll" && frame + data[0].length > recFrame) mode = "recording";
+    if (mode !== "recording") return;
+    const skip = Math.max(0, recFrame - frame);
+    const parts = data.map(ch => ch.subarray(skip));
+    const need = REC.ch;
+    for (let c = 0; c < need; c++) take[c].push(parts[Math.min(c, parts.length - 1)]);
+    take.len += parts[0].length;
+  }
+  function takeArrays() {
+    return take.slice(0, REC.ch).map(chunks => { const out = new Float32Array(take.len); let o = 0; for (const p of chunks) { out.set(p, o); o += p.length; } return out; });
+  }
+
+  // ---- transport
+  function startRec() {
+    if (!ctx) { open(); return; }
+    if (mode === "playing") { cursor = playPos(); stopPlay(); sel = null; }
+    take = Array.from({ length: REC.ch }, () => []); take.len = 0;
+    punch = sel ? { a: Math.min(sel[0], sel[1]), b: Math.max(sel[0], sel[1]) } : { a: cursor, b: null };
+    takeStart = punch.a;
+    const pre = Math.min(+st.preroll, takeStart / REC.sr);
+    const t0 = ctx.currentTime + 0.08;
+    if (pre > 0.05 && recLen() > 0) {
+      const from = takeStart - Math.round(pre * REC.sr);
+      const b = ctx.createBuffer(REC.ch, takeStart - from, REC.sr);
+      REC.chans.forEach((ch, c) => b.copyToChannel(ch.subarray(from, takeStart), c));
+      const s = ctx.createBufferSource(); s.buffer = b; s.connect(ctx.destination); s.start(t0);
+      play = { node: s, t0, from, preroll: true };
+      recFrame = Math.round((t0 + pre) * ctx.sampleRate);
+      mode = "preroll";
+    } else {
+      recFrame = Math.round(t0 * ctx.sampleRate);
+      mode = "preroll";
+    }
+    recBtn.lastChild.textContent = "停止";
+    recBtn.style.background = "#d92d20"; recBtn.style.color = "#fff";
+    tick();
+  }
+  function stopRec(commit = true) {
+    if (play?.preroll) { try { play.node.stop(); } catch (e) {} play = null; }
+    const wasRec = mode === "recording";
+    mode = "idle";
+    recBtn.lastChild.textContent = "录音"; recBtn.style.background = ""; recBtn.style.color = "#d92d20";
+    if (!commit || !wasRec || !take.len) { take = null; draw(); return; }
+    let ins = takeArrays();
+    const a = punch.a, n = recLen();
+    const b = punch.b != null ? punch.b : Math.min(n, a + ins[0].length);   // selection: replace it; else overwrite
+    ins = crossfadeInto(ins, REC.chans, a, b);
+    recReplace(a, b, ins);
+    cursor = a + ins[0].length; sel = null; take = null;
+    if (cursor > view.start + view.span) view.start = Math.max(0, cursor - view.span * 0.8);
+    draw(); renderList();
+  }
+  function startPlay() {
+    if (!ctx) { open(); return; }
+    if (!recLen()) return;
+    const a = sel ? Math.min(sel[0], sel[1]) : (cursor >= recLen() ? 0 : cursor);
+    const e = sel ? Math.max(sel[0], sel[1]) : recLen();
+    const b = ctx.createBuffer(REC.ch, e - a, REC.sr);
+    REC.chans.forEach((ch, c) => b.copyToChannel(ch.subarray(a, e), c));
+    const s = ctx.createBufferSource(); s.buffer = b; s.connect(ctx.destination);
+    const t0 = ctx.currentTime + 0.02; s.start(t0);
+    play = { node: s, t0, from: a, end: e };
+    s.onended = () => { if (mode === "playing" && play?.node === s) { mode = "idle"; play = null; playBtn.lastChild.textContent = "播放"; draw(); } };
+    mode = "playing"; playBtn.lastChild.textContent = "停止"; tick();
+  }
+  function playPos() { return play ? Math.min(play.end ?? recLen(), play.from + Math.max(0, Math.round((ctx.currentTime - play.t0) * REC.sr))) : cursor; }
+  function stopPlay() { if (play) { try { play.node.stop(); } catch (e) {} } cursor = playPos(); play = null; mode = "idle"; playBtn.lastChild.textContent = "播放"; draw(); }
+
+  // ---- edits
+  function undo() { const op = REC.undo.pop(); if (!op) return; recReplace(op.a, op.a + op.ins[0].length, op.removed, false); REC.redo.push(op); cursor = op.a; sel = null; draw(); }
+  function redo() { const op = REC.redo.pop(); if (!op) return; recReplace(op.a, op.a + op.removed[0].length, op.ins, false); REC.undo.push(op); cursor = op.a + op.ins[0].length; draw(); }
+  function delSel() {
+    // remove the selection; the audio before and after it is joined with a crossfade
+    if (!sel || mode !== "idle") return;
+    const a = Math.min(...sel), b = Math.max(...sel), n = recLen();
+    const x = Math.min(Math.round(XFADE_S * REC.sr), a, n - b);
+    const ins = REC.chans.map(ch => {
+      const out = new Float32Array(x);
+      for (let i = 0; i < x; i++) { const w = i / x; out[i] = ch[a - x + i] * Math.cos(w * Math.PI / 2) + ch[b + i] * Math.sin(w * Math.PI / 2); }
+      return out;
+    });
+    recReplace(a - x, b + x, ins);
+    cursor = a - x; sel = null; draw();
+  }
+  function clearAll() {
+    if (recLen() && !confirm("清空整段录音？（可撤销）")) return;
+    if (recLen()) recReplace(0, recLen(), REC.chans.map(() => new Float32Array(0)));
+    cursor = 0; sel = null; view = { start: 0, span: REC.sr * 10 }; REC.dirty = false; draw();
+  }
+
+  // ---- drawing
+  const css = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
+  const fmt = smp => { const s = smp / REC.sr, mm = Math.floor(s / 60); return `${String(mm).padStart(2, "0")}:${(s - mm * 60).toFixed(3).padStart(6, "0")}`; };
+  function draw() {
+    if (!canvas.isConnected) return;
+    const dpr = window.devicePixelRatio || 1, W = canvas.clientWidth * dpr, H = canvas.clientHeight * dpr;
+    canvas.width = W; canvas.height = H; ruler.width = W; ruler.height = ruler.clientHeight * dpr;
+    const g = canvas.getContext("2d"), n = recLen();
+    if (!view.span) view.span = Math.max(n, REC.sr * 10);
+    const spp = view.span / W, x = smp => (smp - view.start) / spp;
+    g.fillStyle = css("--surface"); g.fillRect(0, 0, W, H);
+    if (sel) { g.fillStyle = css("--accent-weak"); g.fillRect(x(Math.min(...sel)), 0, Math.abs(x(sel[1]) - x(sel[0])), H); }
+    g.strokeStyle = css("--line"); g.beginPath(); g.moveTo(0, H / 2); g.lineTo(W, H / 2); g.stroke();
+    // waveform from the 256-sample peak table (or raw samples when zoomed in)
+    if (n) {
+      if (!REC.peaks) recPeaks();
+      const P = REC.peaks;
+      g.fillStyle = css("--accent");
+      for (let px = 0; px < W; px++) {
+        const a = Math.floor(view.start + px * spp), b = Math.floor(view.start + (px + 1) * spp);
+        if (a >= n) break;
+        let lo = 1, hi = -1;
+        if (spp >= P.B) { for (let k = Math.floor(a / P.B); k <= Math.min(P.mn.length - 1, Math.floor(b / P.B)); k++) { lo = Math.min(lo, P.mn[k]); hi = Math.max(hi, P.mx[k]); } }
+        else for (let i = Math.max(0, a); i <= Math.min(n - 1, b); i++) for (const ch of REC.chans) { lo = Math.min(lo, ch[i]); hi = Math.max(hi, ch[i]); }
+        if (hi < lo) continue;
+        g.fillRect(px, H / 2 - hi * H / 2, 1, Math.max(1, (hi - lo) * H / 2));
+      }
+    }
+    // the take being recorded, drawn in red over where it will land
+    if (take && take.len) {
+      g.fillStyle = "#d92d2099";
+      const step = Math.max(1, Math.floor(spp));
+      const chunks = take[0];
+      let off = 0;
+      for (const p of chunks) {
+        for (let i = 0; i < p.length; i += step) {
+          let pk = 0; for (let k = i; k < Math.min(p.length, i + step); k++) pk = Math.max(pk, Math.abs(p[k]));
+          const px = x(takeStart + off + i);
+          if (px >= 0 && px < W) g.fillRect(px, H / 2 - pk * H / 2, Math.max(1, step / spp), pk * H);
+        }
+        off += p.length;
+      }
+    }
+    // cursor / playhead
+    const pos = mode === "playing" || play?.preroll ? playPos() : (mode === "recording" && take ? takeStart + take.len : cursor);
+    g.fillStyle = mode === "recording" ? "#d92d20" : css("--text"); g.fillRect(Math.round(x(pos)), 0, Math.max(1, dpr), H);
+    if (punch && mode !== "idle" && punch.b != null) { g.fillStyle = "#d92d20"; g.fillRect(Math.round(x(punch.b)), 0, dpr, H); }
+    // ruler
+    const r = ruler.getContext("2d"); r.fillStyle = css("--surface-2"); r.fillRect(0, 0, ruler.width, ruler.height);
+    r.fillStyle = css("--muted"); r.font = `${11 * dpr}px ui-monospace,monospace`;
+    const secs = view.span / REC.sr, stepS = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300].find(s => secs / s <= 12) || 600;
+    for (let t = Math.ceil(view.start / REC.sr / stepS) * stepS; t * REC.sr < view.start + view.span; t += stepS) {
+      const px = x(t * REC.sr); r.fillRect(px, ruler.height * 0.55, dpr, ruler.height * 0.45); r.fillText(fmt(t * REC.sr).replace(/\.\d+$/, s => stepS < 1 ? s.slice(0, 2) : ""), px + 3 * dpr, ruler.height * 0.62);
+    }
+    clock.textContent = fmt(pos);
+    clock.style.color = mode === "recording" ? "#d92d20" : "";
+    const len = fmt(n);
+    info.textContent = `${REC.sr / 1000} kHz · ${REC.ch === 1 ? "单声道" : "立体声"} · 总长 ${len}` + (sel ? ` · 选区 ${fmt(Math.abs(sel[1] - sel[0]))}（按空格重录这一段）` : "");
+    meterBar.style.width = `${Math.max(0, Math.min(100, (peakDb + 60) / 60 * 100))}%`;
+    meterTxt.textContent = (peakDb > -89 ? peakDb.toFixed(1) : "-∞") + " dBFS" + (clip ? " 削波!" : "");
+    meterTxt.style.color = clip ? "#d92d20" : "";
+  }
+  let raf = null;
+  function tick() {
+    cancelAnimationFrame(raf);
+    const loop = () => {
+      if (!canvas.isConnected) return;
+      const pos = mode === "recording" && take ? takeStart + take.len : playPos();
+      if ((mode === "recording" || mode === "playing") && pos > view.start + view.span * 0.95) view.start = pos - view.span * 0.2;
+      draw();
+      if (mode !== "idle" || ctx) raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+  }
+  function zoom(f, around) {
+    const c = around ?? (mode === "idle" ? cursor : playPos());
+    const span = Math.max(REC.sr * 0.05, Math.min(Math.max(recLen(), REC.sr * 10) * 1.2, view.span * f));
+    view.start = Math.max(0, c - (c - view.start) * span / view.span); view.span = span; draw();
+  }
+
+  // ---- mouse
+  const smpAt = ev => { const r = canvas.getBoundingClientRect(); return Math.max(0, Math.min(recLen(), Math.round(view.start + (ev.clientX - r.left) / r.width * view.span))); };
+  let drag = null;
+  canvas.addEventListener("mousedown", ev => {
+    if (mode !== "idle") return;
+    const s = smpAt(ev);
+    if (ev.shiftKey) { sel = [sel ? sel[0] : cursor, s]; drag = null; draw(); return; }
+    drag = { s, x: ev.clientX }; cursor = s; sel = null; draw();
+  });
+  canvas.addEventListener("wheel", ev => {
+    ev.preventDefault();
+    if (ev.ctrlKey) zoom(ev.deltaY > 0 ? 1.25 : 0.8, smpAt(ev));
+    else { view.start = Math.max(0, view.start + (ev.deltaY + ev.deltaX) / canvas.clientWidth * view.span * 0.5); draw(); }
+  }, { passive: false });
+
+  // ---- keyboard (only while this page is shown, not while typing)
+  const onKey = ev => {
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "")) return;
+    const k = ev.key;
+    if (k === " ") { ev.preventDefault(); mode === "recording" || mode === "preroll" ? stopRec(true) : startRec(); }
+    else if (k === "Enter") { ev.preventDefault(); if (mode === "playing") stopPlay(); else if (mode === "idle") startPlay(); }
+    else if (k === "Escape") { if (mode === "recording" || mode === "preroll") stopRec(false); else { sel = null; draw(); } }
+    else if ((k === "Delete" || k === "Backspace") && sel) { ev.preventDefault(); delSel(); }
+    else if (ev.ctrlKey && (k === "z" || k === "Z")) { ev.preventDefault(); ev.shiftKey ? redo() : undo(); }
+    else if (ev.ctrlKey && (k === "y" || k === "Y")) { ev.preventDefault(); redo(); }
+    else if (k === "Home") { cursor = 0; view.start = 0; draw(); }
+    else if (k === "End") { cursor = recLen(); view.start = Math.max(0, cursor - view.span * 0.8); draw(); }
+  };
+  window.addEventListener("keydown", onKey);
+  const onMove = ev => { if (drag && Math.abs(ev.clientX - drag.x) > 3) { sel = [drag.s, smpAt(ev)]; draw(); } };
+  const onUp = () => { if (drag && sel && Math.abs(sel[1] - sel[0]) < REC.sr * 0.02) sel = null; drag = null; draw(); };
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+  window.__pageCleanup = () => {          // leaving the page: keep the take, release the microphone
+    if (mode === "recording" || mode === "preroll") stopRec(true);
+    if (mode === "playing") stopPlay();
+    window.removeEventListener("keydown", onKey); window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp);
+    cancelAnimationFrame(raf); close();
+  };
+
+  recBtn.addEventListener("click", () => (mode === "recording" || mode === "preroll") ? stopRec(true) : startRec());
+  playBtn.addEventListener("click", () => mode === "playing" ? stopPlay() : startPlay());
+  enableBtn.addEventListener("click", open);
+  devSel.addEventListener("change", () => { st.device = devSel.value; saveSt(); open(); });
+  srSel.addEventListener("change", () => { st.sr = +srSel.value; saveSt(); if (ctx) open(); });
+  chSel.addEventListener("change", () => {
+    if (recLen()) { alert("已有录音时不能改声道，请先清空"); chSel.value = REC.ch; return; }
+    st.ch = +chSel.value; REC.chans = null; saveSt(); if (ctx) open();
+  });
+  bitsSel.addEventListener("change", () => { st.bits = +bitsSel.value; saveSt(); });
+  preSel.addEventListener("change", () => { st.preroll = +preSel.value; saveSt(); });
+  new ResizeObserver(draw).observe(canvas);
+
+  // ---- save / upload
+  function saveLocal() {
+    if (!recLen()) { alert("还没有录音"); return; }
+    const a = h("a", { href: URL.createObjectURL(encodeWav(REC.chans, REC.sr, +st.bits)), download: (REC.name || "录音") + ".wav" });
+    document.body.append(a); a.click(); a.remove();
+  }
+  async function upload(toStudio) {
+    if (!recLen()) { alert("还没有录音"); return; }
+    msg.textContent = "上传中…";
+    const fd = new FormData();
+    fd.append("file", encodeWav(REC.chans, REC.sr, +st.bits), "take.wav");
+    fd.append("name", REC.name || "录音");
+    const r = await fetch("/api/recordings", { method: "POST", body: fd });
+    const d = await r.json();
+    if (!r.ok) { msg.textContent = d.detail || "上传失败"; return; }
+    REC.dirty = false; msg.textContent = `已保存 ${d.name}`;
+    renderList();
+    if (toStudio) { sessionStorage.setItem("studio.recording", d.name); go("studio"); }
+  }
+  async function renderList() {
+    const items = await (await fetch("/api/recordings")).json().catch(() => []);
+    list.innerHTML = "";
+    if (!items.length) return;
+    list.append(h("div", { class: "tbl", style: "margin-top:12px;max-height:220px;overflow:auto" }, h("table", {}, h("tbody", {}, items.map(x => h("tr", {},
+      h("td", {}, x.name), h("td", { class: "muted", style: "white-space:nowrap" }, fmtSize(x.size)),
+      h("td", { style: "width:260px" }, h("audio", { controls: true, preload: "none", src: x.url, style: "height:32px" })),
+      h("td", { style: "text-align:right;white-space:nowrap" }, h("button", { class: "btn small", type: "button", onclick: () => { sessionStorage.setItem("studio.recording", x.name); go("studio"); } }, "送去处理"))))))));
+  }
+  renderList();
+  if (!REC.chans) REC.chans = Array.from({ length: +st.ch }, () => new Float32Array(0));
+  view = { start: 0, span: Math.max(recLen(), REC.sr * 10) };
+  draw();
 }
 
 // ---------------------------------------------------------------- formats page
