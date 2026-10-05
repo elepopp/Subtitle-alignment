@@ -182,6 +182,31 @@ save(doc, "song.ass", style=None, layout=get_layout("portrait"))
 
 模型（Whisper、wav2vec2、Demucs、RoFormer）第一次使用时会从网络下载。
 
+## 功能测试台（Web）
+
+`webui/` 是一个本地网页，每个功能都可以在页面上运行：语音对齐、歌词对齐、人声分离、格式转换、翻译、校对、格式列表，以及 pytest。页面直接调用 `subalign` CLI，并显示等效命令；对齐结果可以边播放音频边看逐字高亮。用“生成合成测试音频”时，页面会对比真值，算出逐字误差。
+
+- **特效字幕预览**：导出的 `.ass` 用 libass（WebAssembly，`webui/static/vendor/octopus`，MIT）渲染，效果和播放器一致；输入是视频时字幕叠加在视频上，中文用系统字体（微软雅黑 / 黑体）兜底。
+- **人工校对**：对齐结果下方可以逐行修改文字（增删、拆分、合并行，修改起始时间；也可以切到 LRC 文本模式），然后“按修改后的文本重新对齐”。改好的文本会作为带时间的稿件或歌词重新逐字对齐：原来的行时间用来核对 CTC 结果，也作为兜底；歌曲会直接复用已分离的人声。如果文本是自动识别出来的，这个面板会默认展开，并用橙色标出有低置信度字的行。
+
+```bat
+setup.bat    :: 一次性：.venv + 全部依赖（CUDA torch）+ 便携 Ollama + 下载全部模型
+start.bat    :: 启动 http://127.0.0.1:7860 ，同时启动项目内的 Ollama
+```
+
+所有模型都放在项目的 `models/` 目录（`webui/paths.py` 设置各类缓存路径）：
+
+| 目录 | 内容 |
+|---|---|
+| `models/huggingface` | faster-whisper large-v3 / large-v3-turbo，wav2vec2 / MMS CTC 模型 |
+| `models/cache/whisper` | openai-whisper turbo |
+| `models/modelscope` | FunASR Paraformer + VAD + 标点 |
+| `models/torch` | Demucs htdemucs |
+| `models/audio-separator` | BS-RoFormer |
+| `models/ollama` | 本地大模型 qwen2.5:7b（翻译 / 校对，`--llm-provider ollama`） |
+
+单独补下载：`.venv\Scripts\python webui\download_models.py whisper ctc`（可选组：whisper、openai-whisper、ctc、demucs、uvr、funasr、llm）。
+
 ## 开发
 
 ```bash

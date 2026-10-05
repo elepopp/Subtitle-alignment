@@ -26,10 +26,11 @@ import numpy as np
 from ..audio.features import Features, analyze, detect_content_type
 from ..audio.io import load_audio, save_audio
 from ..models import Document, Line, Token
-from ..text.tokenize import is_cjk, lines_from_text, normalize_key, syllable_weight
+from ..text.tokenize import (guess_language, is_cjk, is_credit_line, lines_from_text, normalize_key,
+                              syllable_weight)
 from .sequence import align_tokens, transfer_times
 from .syllable_dp import SONG_PARAMS, SPEECH_PARAMS, DPParams, Unit, align_units
-from .timing import enforce_monotonic, fill_missing_times
+from .timing import _interp_run, enforce_monotonic, fill_missing_times
 
 log = logging.getLogger("subalign")
 
@@ -111,13 +112,13 @@ def _get_asr(cfg: AlignConfig):
     return get_backend(cfg.asr_backend, **kw)
 
 
-def _try_ctc(cfg: AlignConfig):
+def _try_ctc(cfg: AlignConfig, language: Optional[str] = None):
     if cfg.ctc == "off":
         return None
     try:
         from .ctc import HFCTCEmitter
 
-        return HFCTCEmitter(cfg.ctc_model, cfg.language, cfg.device)
+        return HFCTCEmitter(cfg.ctc_model, language or cfg.language, cfg.device)
     except Exception as e:  # missing torch/transformers or model download failure
         if cfg.ctc == "on":
             raise
@@ -155,6 +156,7 @@ def align_audio(audio_path: Union[str, Path], script: Union[None, str, Document]
     params = SONG_PARAMS if mode == "song" else SPEECH_PARAMS
 
     doc = _as_document(script)
+    credits: List[Tuple[int, Line]] = []
     transcript = None
     report = None
     anchor_source = "none"
@@ -177,21 +179,37 @@ def align_audio(audio_path: Union[str, Path], script: Union[None, str, Document]
         _set_anchors_from_times(doc, sigma=0.12 if mode == "speech" else 0.2)
     else:
         doc.kind = mode
-        doc.language = doc.language or cfg.language
+        doc.language = doc.language or cfg.language or guess_language("\n".join(ln.text for ln in doc.lines))
+        # credit lines (作词：xx, "Artist - Title") are not sung: keep them out of the acoustic alignment
+        credits = _pop_credit_lines(doc)
         prior_times = _existing_line_times(doc)
         for t in doc.tokens():
             t.start = t.end = None
-        emitter = _try_ctc(cfg)
+        emitter = _try_ctc(cfg, doc.language)
         if emitter is not None:
-            _anchors_from_ctc(doc, emitter, y)
-            anchor_source = "ctc"
+            quality = _anchors_from_ctc(doc, emitter, y)
+            problem = "no aligned units" if not np.isfinite(quality) else _disagreement(
+                doc, [(ln.tokens[0], tt[0]) for ln, tt in zip(doc.lines, prior_times) if tt and ln.tokens],
+                "script line timestamps")
+            if problem:
+                log.warning("CTC alignment rejected (%s)", problem)
+                _clear_anchors(doc)
+            else:
+                anchor_source = "ctc"
         need_asr = (anchor_source == "none" or cfg.proofread) and cfg.asr_backend != "none"
         if need_asr:
             try:
                 asr = _get_asr(cfg)
                 prompt = " ".join(ln.text for ln in doc.lines)[:600]
-                transcript = asr.transcribe(str(analysis_path), language=cfg.language, prompt=prompt,
-                                            **cfg.asr_options)
+                transcript = asr.transcribe(str(analysis_path), language=cfg.language or doc.language,
+                                            prompt=prompt, **cfg.asr_options)
+                if anchor_source == "ctc":
+                    # cross-check CTC against the recogniser's own timing on exactly matching units
+                    problem = _disagreement(doc, _asr_matches(doc, transcript), "ASR timestamps")
+                    if problem:
+                        log.warning("CTC alignment rejected (%s); using ASR anchors", problem)
+                        _clear_anchors(doc)
+                        anchor_source = "none"
                 report = _anchors_from_asr(doc, transcript, use_times=anchor_source == "none",
                                            sigma=0.15 if mode == "speech" else 0.25)
                 if anchor_source == "none":
@@ -209,6 +227,14 @@ def align_audio(audio_path: Union[str, Path], script: Union[None, str, Document]
     else:
         _apply_anchor_times(doc)
     _finish(doc)
+    if credits:
+        n_sung = len(doc.lines)
+        _restore_credit_lines(doc, credits)
+        if report is not None:   # report line numbers refer to sung lines: map back
+            drop = {i for i, _ in credits}
+            orig = [i for i in range(n_sung + len(credits)) if i not in drop]
+            for it in report.get("issues", []):
+                it["line"] = orig[min(it["line"], len(orig) - 1)]
     return AlignResult(document=doc, mode=mode, anchor_source=anchor_source, report=report, stems=stems,
                        transcript=transcript)
 
@@ -241,10 +267,83 @@ def _anchors_from_line_times(doc: Document, times) -> None:
             _set_anchor(ln.tokens[0], tt[0], 0.7, 0.3)
 
 
-def _anchors_from_ctc(doc: Document, emitter, y: np.ndarray) -> None:
+# CTC scores do not separate good from broken alignments (a wrong blank id scored -5 vs -5 for
+# a correct model), so CTC is validated against independent timing evidence instead
+MAX_ANCHOR_SPREAD = 2.0   # s, median deviation from the reference after removing a global offset
+
+
+def _disagreement(doc: Document, pairs: Sequence[Tuple[Token, float]], what: str) -> Optional[str]:
+    """``pairs``: (token with CTC time, independent reference time).  Returns a reason
+    string when they disagree beyond a constant offset (the LRC may be shifted)."""
+    d = np.array([tok.start - ref for tok, ref in pairs if tok.start is not None and ref is not None])
+    if len(d) < 3:
+        return None
+    spread = float(np.median(np.abs(d - np.median(d))))
+    if spread > MAX_ANCHOR_SPREAD:
+        return f"differs from {what} by {spread:.1f}s (median, {len(d)} points)"
+    return None
+
+
+def _asr_matches(doc: Document, transcript) -> List[Tuple[Token, float]]:
+    from ..asr import transcript_tokens
+
+    hyp = transcript_tokens(transcript)
+    ref = [t for ln in doc.lines for t in ln.tokens]
+    return [(ref[o.ref], hyp[o.hyp].start) for o in align_tokens(ref, hyp)
+            if o.op == "match" and hyp[o.hyp].start is not None]
+
+
+def _clear_anchors(doc: Document) -> None:
+    for t in doc.tokens():
+        _set_anchor(t, None, 0, 0)
+        t.start = t.end = None
+
+
+def _pop_credit_lines(doc: Document) -> List[Tuple[int, Line]]:
+    """Remove credit lines from ``doc``; returns (original index, line) pairs."""
+    if len(doc.lines) < 3:
+        return []
+    credits = [(i, ln) for i, ln in enumerate(doc.lines) if is_credit_line(ln.text, doc.metadata, i)]
+    if len(credits) >= len(doc.lines) - 1:
+        return []
+    drop = {i for i, _ in credits}
+    doc.lines = [ln for i, ln in enumerate(doc.lines) if i not in drop]
+    return credits
+
+
+def _restore_credit_lines(doc: Document, credits: List[Tuple[int, Line]]) -> None:
+    """Put credit lines back: keep their own timestamps when they had some, otherwise
+    share the time before the first sung line (or after the previous line)."""
+    lines = list(doc.lines)
+    for idx, ln in credits:
+        lines.insert(min(idx, len(lines)), ln)
+    first_sung = next((l.start for l in doc.lines if l.start is not None), 0.0)
+    for k, ln in enumerate(lines):
+        if not any(ln is c for _, c in credits):
+            continue
+        nxt = next((l.start for l in lines[k + 1:] if l.start is not None and not any(l is c for _, c in credits)),
+                   None)
+        start = ln.start
+        if start is None:
+            prev = next((l.end for l in reversed(lines[:k]) if l.end is not None), None)
+            start = prev if prev is not None else 0.0
+        end = start + 0.4 * max(1, len(ln.tokens))
+        limit = nxt if nxt is not None else (first_sung if k == 0 else None)
+        if limit is not None and limit > start:
+            end = min(end, limit)
+        for t in ln.tokens:
+            t.start = t.end = None
+        _interp_run(ln.tokens, start, max(end, start + 0.01 * len(ln.tokens)))
+        ln.update_bounds()
+    doc.lines = lines
+
+
+def _anchors_from_ctc(doc: Document, emitter, y: np.ndarray) -> float:
+    """Set CTC anchors; returns the median per-unit score (alignment quality)."""
     from .ctc import ctc_align_tokens
 
     spans = ctc_align_tokens(emitter, y, [[t.text for t in ln.tokens] for ln in doc.lines])
+    scores = [s.score for sp in spans for s in sp if s.start is not None and np.isfinite(s.score)]
     for ln, sp in zip(doc.lines, spans):
         for tok, s in zip(ln.tokens, sp):
             if s.start is None:
@@ -253,6 +352,7 @@ def _anchors_from_ctc(doc: Document, emitter, y: np.ndarray) -> None:
             conf = float(np.clip(math.exp(max(s.score, -20.0)) * 1.2, 0.2, 1.0))
             _set_anchor(tok, s.start, conf, 0.05)
             tok.start, tok.end, tok.confidence = s.start, s.end, conf
+    return float(np.median(scores)) if scores else -np.inf
 
 
 def _anchors_from_asr(doc: Document, transcript, use_times: bool, sigma: float) -> Dict:

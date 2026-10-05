@@ -9,3 +9,9 @@ dist/
 *.wav
 *.mp3
 *.flac
+
+# web test console: local models, tools and job data
+/models/
+/tools/
+/webui_data/
+/.uv-cache/

@@ -1,11 +1,12 @@
 """Text-to-text alignment (script <-> ASR hypothesis) with phonetic costs.
 
-Strategy (fast and robust for long texts):
-  1. exact-match blocks via ``difflib.SequenceMatcher`` (``autojunk`` off so
-     that frequent CJK characters such as 的/了 are not discarded);
-  2. every unmatched gap between two blocks is aligned with a weighted
-     Levenshtein DP whose substitution cost is ``1 - phonetic_similarity``
-     (banded when the gap is large).
+Strategy:
+  * up to ``FULL_DP_CELLS`` (a few thousand units each side) one global
+    weighted Levenshtein DP whose substitution cost is ``1 - phonetic_similarity``
+    (vectorised per row) - robust to repeated choruses / refrains;
+  * longer texts: exact-match blocks via ``difflib.SequenceMatcher`` (``autojunk``
+    off so that frequent CJK characters such as 的/了 are kept), then the same DP
+    inside every gap between blocks (banded when the gap is large).
 """
 from __future__ import annotations
 
@@ -32,48 +33,57 @@ class AlignOp:
 INDEL = 0.8  # insertion / deletion cost (substitution of dissimilar units costs 1.0)
 
 
+def _sim_matrix(ref: Sequence[str], hyp: Sequence[str]) -> np.ndarray:
+    """(n, m) phonetic similarity, computed once per distinct key pair."""
+    ur, ri = np.unique(np.array(ref, dtype=object).astype(str), return_inverse=True)
+    uh, hi = np.unique(np.array(hyp, dtype=object).astype(str), return_inverse=True)
+    small = np.array([[1.0 if a == b else unit_similarity(a, b) for b in uh] for a in ur], dtype=np.float32)
+    return small[np.ix_(ri.ravel(), hi.ravel())]
+
+
 def _dp_gap(ref: Sequence[str], hyp: Sequence[str], r0: int, h0: int, band: int = 400) -> List[AlignOp]:
+    """Weighted Levenshtein (sub = 1 - similarity, indel = INDEL), vectorised per row.
+
+    Within a row the insertion chain ``c[j] = min(t[j], c[j-1] + INDEL)`` is solved
+    with a cumulative minimum: ``c[j] = min_k (t[k] - INDEL*k) + INDEL*j``.
+    """
     n, m = len(ref), len(hyp)
     if n == 0:
         return [AlignOp("ins", None, h0 + j) for j in range(m)]
     if m == 0:
         return [AlignOp("del", r0 + i, None) for i in range(n)]
     inf = 1e18
-    cost = np.full((n + 1, m + 1), inf)
+    sim = _sim_matrix(ref, hyp)
+    use_band = n * m > 4_000_000
     back = np.zeros((n + 1, m + 1), dtype=np.int8)  # 1 diag, 2 up(del), 3 left(ins)
-    cost[0, 0] = 0.0
-    use_band = n * m > 250_000
-    for i in range(0, n + 1):
+    jj = np.arange(m + 1, dtype=np.float64)
+    prev = jj * INDEL
+    back[0, 1:] = 3
+    for i in range(1, n + 1):
+        diag = np.full(m + 1, inf)
+        diag[1:] = prev[:-1] + (1.0 - sim[i - 1])
+        up = prev + INDEL
+        t = np.minimum(diag, up)
+        arg = np.where(diag <= up, 1, 2).astype(np.int8)
         if use_band:
             c = i * m / n
-            jlo, jhi = max(0, int(c - band)), min(m, int(c + band))
-        else:
-            jlo, jhi = 0, m
-        for j in range(jlo, jhi + 1):
-            if i == 0 and j == 0:
-                continue
-            best, arg = inf, 0
-            if i > 0 and j > 0 and cost[i - 1, j - 1] < inf:
-                s = unit_similarity(ref[i - 1], hyp[j - 1])
-                v = cost[i - 1, j - 1] + (1.0 - s)
-                if v < best:
-                    best, arg = v, 1
-            if i > 0 and cost[i - 1, j] < inf:
-                v = cost[i - 1, j] + INDEL
-                if v < best:
-                    best, arg = v, 2
-            if j > 0 and cost[i, j - 1] < inf:
-                v = cost[i, j - 1] + INDEL
-                if v < best:
-                    best, arg = v, 3
-            cost[i, j], back[i, j] = best, arg
+            out = (jj < c - band) | (jj > c + band)
+            t[out] = inf
+        left = np.minimum.accumulate(t - INDEL * jj) + INDEL * jj
+        ins = left < t - 1e-12
+        cur = np.where(ins, left, t)
+        arg[ins] = 3
+        back[i] = arg
+        prev = cur
     ops: List[AlignOp] = []
     i, j = n, m
     while i > 0 or j > 0:
-        a = back[i, j]
+        a = back[i, j] if i > 0 else 3
+        if j == 0:
+            a = 2
         if a == 1:
-            s = unit_similarity(ref[i - 1], hyp[j - 1])
-            ops.append(AlignOp("match" if s >= 0.999 else "sub", r0 + i - 1, h0 + j - 1, s))
+            sv = float(sim[i - 1, j - 1])
+            ops.append(AlignOp("match" if sv >= 0.999 else "sub", r0 + i - 1, h0 + j - 1, sv))
             i, j = i - 1, j - 1
         elif a == 2:
             ops.append(AlignOp("del", r0 + i - 1, None))
@@ -85,13 +95,19 @@ def _dp_gap(ref: Sequence[str], hyp: Sequence[str], r0: int, h0: int, band: int 
     return ops
 
 
+# global DP up to this many cells (memory: one int8 per cell); longer texts are split at
+# exact-match blocks first
+FULL_DP_CELLS = 25_000_000
+
+
 def align_keys(ref: Sequence[str], hyp: Sequence[str]) -> List[AlignOp]:
+    if len(ref) * len(hyp) <= FULL_DP_CELLS:
+        # one global alignment: block matching can pair a repeated chorus with the wrong repeat
+        return _dp_gap(list(ref), list(hyp), 0, 0)
     sm = SequenceMatcher(None, list(ref), list(hyp), autojunk=False)
     ops: List[AlignOp] = []
     ri = hi = 0
     for blk in sm.get_matching_blocks():
-        # short isolated matches inside large gaps are unreliable anchors: let
-        # the DP decide them together with the gap.
         ops.extend(_dp_gap(ref[ri:blk.a], hyp[hi:blk.b], ri, hi))
         for k in range(blk.size):
             ops.append(AlignOp("match", blk.a + k, blk.b + k, 1.0))

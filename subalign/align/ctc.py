@@ -199,7 +199,12 @@ class HFCTCEmitter:
         self.model.to(self.device).eval()
         tok = getattr(self.processor, "tokenizer", self.processor)
         self.vocab: Dict[str, int] = dict(tok.get_vocab())
-        self.blank = self.vocab.get("<pad>", self.vocab.get("[PAD]", tok.pad_token_id or 0))
+        # the CTC blank is the model's pad_token_id (what transformers' CTC loss uses); the
+        # tokenizer's <pad> differs from it in some models (MMS: <blank>=0, <pad>=1)
+        blank = getattr(self.model.config, "pad_token_id", None)
+        if blank is None:
+            blank = self.vocab.get("<blank>", self.vocab.get("<pad>", self.vocab.get("[PAD]", tok.pad_token_id or 0)))
+        self.blank = int(blank)
         self.frame_s = 0.02
 
     def emissions(self, y: np.ndarray, sr: int = 16000, chunk_s: float = 20.0, ctx_s: float = 1.0) -> np.ndarray:

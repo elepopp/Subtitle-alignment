@@ -170,3 +170,52 @@ def strip_punct(text: str, mode: str = "keep") -> str:
             continue
         out.append(c)
     return "".join(out).strip()
+
+
+def guess_language(text: str) -> Optional[str]:
+    """Script-based language guess for lyrics / scripts: zh | ja | ko | en, or None."""
+    han = kana = hangul = latin = 0
+    for c in text:
+        o = ord(c)
+        if 0x3040 <= o <= 0x30FF:
+            kana += 1
+        elif 0xAC00 <= o <= 0xD7A3 or 0x1100 <= o <= 0x11FF:
+            hangul += 1
+        elif 0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF:
+            han += 1
+        elif c.isascii() and c.isalpha():
+            latin += 1
+    cjk = han + kana + hangul
+    if cjk == 0:
+        return "en" if latin >= 20 else None
+    if kana >= 0.1 * cjk:
+        return "ja"
+    if hangul >= 0.3 * cjk:
+        return "ko"
+    if han >= max(kana, hangul) and han * 2 >= latin / 4:
+        return "zh"
+    return None
+
+
+# credit / metadata lines shipped in LRC / QRC / KRC files (作词：xx, Composed by: xx, ...)
+_CREDIT_RE = re.compile(
+    r"^\s*(?:作词|作曲|编曲|词|曲|填词|原唱|翻唱|演唱|歌手|监制|制作人?|出品人?|发行|混音|母带|录音|和声|配唱|"
+    r"吉他|贝斯|鼓|键盘|弦乐|人声编辑|音频编辑|统筹|策划|版权|OP|SP|ISRC|"
+    r"lyrics?(?:\s+by)?|lyricist|composer|composed\s+by|music(?:\s+by)?|written\s+by|arranged?\s+by|arranger|"
+    r"produced\s+by|producer|mix(?:ed|ing)?(?:\s+by)?|master(?:ed|ing)?(?:\s+by)?)\s*[:：]",
+    re.IGNORECASE)
+
+
+def is_credit_line(text: str, metadata: Optional[dict] = None, index: int = 0) -> bool:
+    """True for non-sung credit lines (作词：xx) and a leading "Artist - Title" header."""
+    if _CREDIT_RE.match(text):
+        return True
+    if index > 1 or "-" not in text:
+        return False
+    parts = [p.strip() for p in re.split(r"\s*-\s*", text.strip(), maxsplit=1)]
+    if len(parts) != 2 or not all(parts):
+        return False
+    vals = {str(v).strip() for k, v in (metadata or {}).items() if k in ("title", "artist", "ti", "ar")} - {""}
+    if vals:                       # header must name the song or the artist
+        return bool(set(parts) & vals)
+    return bool(re.search(r"\s-|-\s", text))   # no metadata: the spaced "Artist - Title" form

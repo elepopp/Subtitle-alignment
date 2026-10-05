@@ -117,12 +117,30 @@ def test_ctc_anchor_path(song, tmp_path, monkeypatch):
     from subalign.align import aligner
 
     path, truth = song
-    monkeypatch.setattr(aligner, "_try_ctc", lambda cfg: FakeEmitter(truth, LYRICS))
+    monkeypatch.setattr(aligner, "_try_ctc", lambda cfg, language=None: FakeEmitter(truth, LYRICS))
     cfg = AlignConfig(mode="song", asr_backend="none", ctc="on", separation="none")
     res = align_audio(path, "\n".join(LYRICS), cfg, workdir=tmp_path / "w")
     assert res.anchor_source == "ctc"
     err = [abs(t.start - s) for ln, tl in zip(res.document.lines, truth) for t, (s, _) in zip(ln.tokens, tl)]
     assert np.mean(np.array(err) < 0.05) > 0.9
+
+
+def test_broken_ctc_is_rejected_and_credits_keep_their_times(song, tmp_path, monkeypatch):
+    from subalign.align import aligner
+
+    path, truth = song
+    # an emitter that piles every unit at the start (what a wrong blank id produced)
+    shifted = [[(0.5 + 0.1 * k, 0.6 + 0.1 * k) for k in range(len(tl))] for tl in truth]
+    monkeypatch.setattr(aligner, "_try_ctc", lambda cfg, language=None: FakeEmitter(shifted, LYRICS))
+    lrc = "[00:00.00]作词：某某\n" + "".join(
+        f"[{int(tl[0][0] // 60):02d}:{tl[0][0] % 60:05.2f}]{l}\n" for l, tl in zip(LYRICS, truth))
+    cfg = AlignConfig(mode="song", asr_backend="none", ctc="on", separation="none")
+    res = align_audio(path, lrc, cfg, workdir=tmp_path / "w")
+    assert res.anchor_source == "script-timestamps"
+    lines = res.document.lines
+    assert lines[0].text == "作词：某某" and lines[0].start == 0.0
+    err = [abs(ln.start - tl[0][0]) for ln, tl in zip(lines[1:], truth)]
+    assert max(err) < 0.3
 
 
 def test_cli_convert_restyle(tmp_path):
