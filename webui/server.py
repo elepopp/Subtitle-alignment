@@ -236,7 +236,7 @@ def _worker() -> None:
 
 
 # ------------------------------------------------------------------ helpers
-TASKS = ("align", "lyrics", "separate", "roughcut", "studio", "convert", "translate", "proofread")
+TASKS = ("align", "lyrics", "separate", "roughcut", "videocut", "studio", "convert", "translate", "proofread")
 RECORDINGS = paths.WORK / "recordings"
 
 
@@ -280,7 +280,7 @@ async def create_job(task: str = Form(...), args: str = Form("[]"), media: Optio
 
     # --- primary input
     media_path: Optional[Path] = None
-    if task in ("align", "lyrics", "separate", "roughcut", "studio"):
+    if task in ("align", "lyrics", "separate", "roughcut", "videocut", "studio"):
         if media is not None and media.filename:
             media_path = await _save_upload(media, wd / "input")
         elif sample or recording:
@@ -307,7 +307,7 @@ async def create_job(task: str = Form(...), args: str = Form("[]"), media: Optio
         name = Path(text_name or ("script.txt" if task in ("align", "lyrics") else "input.srt")).name
         text_path = wd / "input" / name
         text_path.write_text(text_content, encoding="utf-8")
-    if task in ("align", "roughcut") and text_path:
+    if task in ("align", "roughcut", "videocut") and text_path:
         argv += ["--script", str(text_path)]
     elif task == "lyrics" and text_path:
         argv += ["--lyrics", str(text_path)]
@@ -372,7 +372,7 @@ def _add_flags(task: str, argv: List[str], pairs: List[list], wd: Path, glossary
         else:
             argv += ["--style", str(sp)]
     # the page previews the json output of alignments
-    if task in ("align", "lyrics", "convert", "roughcut") and "-f" in argv:
+    if task in ("align", "lyrics", "convert", "roughcut", "videocut") and "-f" in argv:
         i = argv.index("-f")
         fl = argv[i + 1].split(",")
         if "json" not in fl:
@@ -738,6 +738,57 @@ def roughcut_apply(job_id: str, body: Dict[str, Any] = Body(...)):
     meta = {k: v for k, v in meta_p.items() if k not in ("_command", "style_edit")}
     meta.update(pairs=pairs, parent=parent.id, edited=True, media=meta_p.get("media"))
     return _enqueue("roughcut", argv, wd, meta)
+
+
+@app.post("/api/jobs/{job_id}/videocut")
+def videocut_apply(job_id: str, body: Dict[str, Any] = Body(...)):
+    """Render a video rough cut again with reviewed decisions (no recognition).
+
+    ``body.removals``: per removal of the plan ``{"mode": cut|mute|keep|null, "transition": auto|cut|fade|zoom}``
+    (null mode = decide automatically); ``body.video``: optional picture settings.
+    """
+    from subalign.videocut import MODES, TRANSITIONS, VideoCutConfig
+
+    parent = _load_job(job_id)
+    if parent is None or parent.task != "videocut":
+        raise HTTPException(404, "job not found")
+    plan_file = next(iter(sorted((parent.workdir / "output").glob("*.videocut.json"))), None)
+    if plan_file is None:
+        raise HTTPException(400, "原任务没有剪辑计划")
+    plan = json.loads(plan_file.read_text(encoding="utf-8"))
+    edits = body.get("removals")
+    if not isinstance(edits, list) or len(edits) != len(plan.get("removals", [])):
+        raise HTTPException(400, "removals 与剪辑计划不匹配")
+    for r, e in zip(plan["removals"], edits):
+        e = e or {}
+        mode = e.get("mode")
+        r["locked"] = mode in MODES
+        if mode in MODES:
+            r["mode"] = mode
+        r["transition"] = e.get("transition") if e.get("transition") in TRANSITIONS else "auto"
+    video = plan.setdefault("settings", {}).setdefault("video", {})
+    for k, v in (body.get("video") or {}).items():
+        if k in VideoCutConfig.__dataclass_fields__ and v is not None:
+            video[k] = v
+    src_media = Path(parent.argv[1]) if len(parent.argv) > 1 else None
+    if src_media is None or not src_media.exists():
+        src_media = next((f for f in sorted((parent.workdir / "input").glob("*")) if f.suffix.lower() in MEDIA_EXT), None)
+    if src_media is None:
+        raise HTTPException(400, "原任务的视频已不存在")
+    wd = _new_workdir()
+    media = wd / "input" / src_media.name
+    shutil.copy(src_media, media)
+    pf = wd / "input" / "edited.videocut.json"
+    pf.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+    meta_p = parent.meta or {}
+    # picture settings now come from the plan (its values win over the defaults only)
+    drop = {"--min-shot", "--max-cuts", "--no-mute", "--mute-max", "--slide", "--transitions", "--zoom",
+            "--fade-frames", "--content", "--llm", "--no-pauses", "--max-pause", "--keep-pause"}
+    pairs = [p for p in meta_p.get("pairs", []) if p and p[0] not in drop]
+    argv = _add_flags("videocut", ["videocut", str(media), "--plan", str(pf)], pairs, wd, "", meta_p.get("style_json", ""))
+    meta = {k: v for k, v in meta_p.items() if k not in ("_command", "style_edit")}
+    meta.update(pairs=pairs, parent=parent.id, edited=True, media=meta_p.get("media"))
+    return _enqueue("videocut", argv, wd, meta)
 
 
 @app.post("/api/recordings")

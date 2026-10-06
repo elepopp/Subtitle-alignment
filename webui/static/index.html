@@ -464,6 +464,18 @@ Object.assign(F, {
   stSampleRate: { flag: "--sample-rate", type: "select", label: "采样率", opts: [["48000", "48 kHz（视频）"], ["44100", "44.1 kHz（音乐平台）"]] },
   stChannels: { flag: "--channels", type: "select", label: "声道", opts: [["2", "立体声"], ["1", "单声道"]] },
 });
+Object.assign(F, {
+  vcContent: { flag: "--content", type: "select", label: "画面类型", opts: [["auto", "自动识别"], ["talking", "真人出镜"], ["screen", "录屏 / 静态画面（放开剪）"]] },
+  vcTransitions: { flag: "--transitions", type: "select", label: "剪点处理", opts: [["auto", "自动：硬切 / 叠化 / 推近（推荐）"], ["cut", "全部硬切"], ["fade", "全部短叠化"], ["zoom", "全部推近 / 拉远"]], hint: "按刀口前后画面差异选：几乎看不出就硬切，中等用几帧叠化，明显用推近 / 拉远" },
+  vcMinShot: { flag: "--min-shot", type: "number", label: "最短画面段 (秒)", step: "0.1", placeholder: "1.5", hint: "两刀之间的画面短于这个时长时，放弃价值最低的那一刀（静音或保留）" },
+  vcMaxCuts: { flag: "--max-cuts", type: "number", label: "每 10 秒最多剪几刀", step: "1", placeholder: "3" },
+  vcMute: { flag: "--no-mute", type: "neg", label: "短语气词改为静音，画面不剪（嘴几乎不动时）" },
+  vcMuteMax: { flag: "--mute-max", type: "number", label: "可静音的语气词最长 (秒)", step: "0.05", placeholder: "0.45" },
+  vcSlide: { flag: "--slide", type: "number", label: "画面剪点可在停顿内移动 (秒)", step: "0.05", placeholder: "0.25", hint: "在停顿里挑前后最像的两帧下刀，不影响口型同步" },
+  vcZoom: { flag: "--zoom", type: "number", label: "推近倍数", step: "0.01", placeholder: "1.12" },
+  vcFadeFrames: { flag: "--fade-frames", type: "number", label: "叠化帧数", step: "1", placeholder: "4" },
+  vcFcpxml: { flag: "--no-fcpxml", type: "neg", label: "导出 FCPXML 工程（Final Cut / DaVinci / Premiere）" },
+});
 const EXPORT = ["formats", "layout", "fontSize", "maxChars", "maxLines", "punct", "mono", "style"];
 
 const TASKS = {
@@ -501,6 +513,16 @@ const TASKS = {
     media: true, sample: null, text: { label: "逐字稿 (可选，不填则自动识别)", hint: "有原话逐字稿时可粘贴；没有就留空", name: "script.txt" },
     basic: ["rcLevel", "rcFillers", "rcRepeats", "rcRetakes", "rcUnrec", "rcPauses", "lang", "asr", "asrModel"],
     adv: ["rcMaxPause", "rcKeepPause", "rcMinGap", "rcCrossfade", "rcExtra", "rcKeep", "rcFormat", "rcNoVideo", "device"],
+    llm: ["rcLLM"], export: true, defaultFormats: ["srt", "json"],
+  },
+  videocut: {
+    nav: "视频粗剪", title: "视频粗剪 videocut", desc: "口播视频：和语音粗剪一样找出语气词 / 重复 / 重录 / 长停顿，但按画面来决定怎么剪 —— 刀数少、画面段不过短，剪点挑在停顿里前后最像的帧，看得出的跳切用叠化或推近 / 拉远遮住；口型同步不变。",
+    media: true, sample: null, text: { label: "逐字稿 (可选，不填则自动识别)", hint: "有原话逐字稿时可粘贴；没有就留空", name: "script.txt" },
+    sections: [
+      ["画面", ["vcContent", "vcTransitions", "vcMinShot", "vcMaxCuts", "vcMute"], true],
+      ["剪什么（同语音粗剪）", ["rcLevel", "rcFillers", "rcRepeats", "rcRetakes", "rcUnrec", "rcPauses", "lang", "asr", "asrModel"], true],
+      ["更多", ["vcMuteMax", "vcSlide", "vcZoom", "vcFadeFrames", "vcFcpxml", "rcMaxPause", "rcKeepPause", "rcMinGap", "rcCrossfade", "rcExtra", "rcKeep", "device"], false],
+    ],
     llm: ["rcLLM"], export: true, defaultFormats: ["srt", "json"],
   },
   studio: {
@@ -643,7 +665,7 @@ function buildArgs(task, state) {
 const PAGES = {
   status: { nav: "状态总览", icon: "dashboard", render: renderStatus },
   align: { nav: "语音对齐", icon: "mic" }, lyrics: { nav: "歌词对齐", icon: "music" }, separate: { nav: "人声分离", icon: "wave" },
-  roughcut: { nav: "语音粗剪", icon: "scissors" }, studio: { nav: "音频处理", icon: "sliders" },
+  roughcut: { nav: "语音粗剪", icon: "scissors" }, videocut: { nav: "视频粗剪", icon: "video" }, studio: { nav: "音频处理", icon: "sliders" },
   recorder: { nav: "录音棚", icon: "record", render: m => renderRecorder(m) },
   dubbing: { nav: "AI 配音", icon: "voice", render: m => renderDubbing(m) },
   dubtrans: { nav: "音频翻译", icon: "translate", render: m => renderDubTrans(m) },
@@ -653,7 +675,7 @@ const PAGES = {
   tests: { nav: "单元测试", icon: "flask", render: renderTests },
 };
 for (const k of Object.keys(TASKS)) PAGES[k].render = () => renderTask(k);
-const NAV = [["", ["status"]], ["对齐", ["align", "lyrics", "separate"]], ["录音与剪辑", ["recorder", "dubtrans", "dubbing", "studio", "roughcut"]], ["字幕工具", ["convert", "translate", "proofread"]], ["系统", ["formats", "jobs", "tests"]]];
+const NAV = [["", ["status"]], ["对齐", ["align", "lyrics", "separate"]], ["录音与剪辑", ["recorder", "dubtrans", "dubbing", "studio", "roughcut", "videocut"]], ["字幕工具", ["convert", "translate", "proofread"]], ["系统", ["formats", "jobs", "tests"]]];
 let current = location.hash.slice(1) || store.get("page", "status");
 
 function renderNav() {
@@ -957,7 +979,7 @@ async function outputTabs(j, box, task) {
   const files = j.files || [];
   const tabs = [];
   const audios = files.filter(f => f.kind === "audio");
-  const jsonF = files.find(f => f.kind === "json" && !f.name.includes("proofread") && !f.name.includes(".roughcut."));
+  const jsonF = files.find(f => f.kind === "json" && !f.name.includes("proofread") && !f.name.includes(".roughcut.") && !f.name.includes(".videocut."));
   if (j.task === "studio") {
     const rep = files.find(f => /\.studio\.json$/.test(f.name));
     const outA = files.find(f => /\.processed\./.test(f.name));
@@ -969,6 +991,12 @@ async function outputTabs(j, box, task) {
     const planF = files.find(f => /\.roughcut\.json$/.test(f.name));
     if (planF) tabs.push({ key: "review", label: "剪辑审阅", icon: "scissors", build: () => roughcutCard(planF, j, box, task || j.task, files) });
     j = { ...j, meta: { ...(j.meta || {}), source_media: j.meta?.media, media: cutMedia?.url || j.meta?.media } };
+  }
+  if (j.task === "videocut") {
+    const cutVideo = files.find(f => f.kind === "video" && /\.vcut\./.test(f.name));
+    const planF = files.find(f => /\.videocut\.json$/.test(f.name));
+    if (planF) tabs.push({ key: "vreview", label: "剪辑审阅", icon: "video", build: () => videocutCard(planF, j, box, task || j.task, files) });
+    j = { ...j, meta: { ...(j.meta || {}), source_media: j.meta?.media, media: cutVideo?.url || j.meta?.media } };
   }
   let doc = null;
   if (jsonF) { try { doc = await (await fetch(jsonF.url)).json(); } catch (e) {} }
@@ -993,8 +1021,8 @@ async function outputTabs(j, box, task) {
       h("div", { class: "md transcript", html: miniMd(t) }));
   } });
   const reports = files.filter(f => f.kind === "markdown" && f !== trF);
-  const titles = { "proofread.md": "稿件与实际语音的差异", "asr-report.md": "识别质检：疑似幻觉 / 两个模型不一致", "roughcut.md": "剪辑明细" };
-  if (reports.length) tabs.push({ key: "report", label: j.task === "roughcut" ? "剪辑报告" : "报告",
+  const titles = { "proofread.md": "稿件与实际语音的差异", "asr-report.md": "识别质检：疑似幻觉 / 两个模型不一致", "roughcut.md": "剪辑明细", "videocut.md": "视频剪辑明细" };
+  if (reports.length) tabs.push({ key: "report", label: j.task === "roughcut" || j.task === "videocut" ? "剪辑报告" : "报告",
     badge: reports.some(f => /asr-report/.test(f.name)) ? "质检" : null, badgeCls: "warn", icon: "report", build: async () => {
     const wrap = h("div");
     for (const f of reports) {
@@ -1160,6 +1188,91 @@ async function roughcutCard(planF, j, box, task, files) {
   card.append(h("div", { class: "row", style: "margin-top:14px" }, go, dirty, msg,
     h("span", { class: "hint" }, "只重新渲染，不会重新识别，几秒钟完成")));
   render();
+  return card;
+}
+
+// ---------------------------------------------------------------- video rough cut review
+const VC_MODE = { cut: ["剪", "ok"], mute: ["静音", "run"], keep: ["保留", "warn"] };
+const VC_TR = { cut: "硬切", fade: "叠化", zoom: "推近 / 拉远", "": "" };
+const VC_WHY = { short_shot: "画面段过短", density: "剪点过密", manual: "手动" };
+async function videocutCard(planF, j, box, task, files) {
+  const plan = await (await fetch(planF.url)).json();
+  const st = plan.stats || {}, rems = plan.removals || [];
+  const card = h("div", { class: "card" });
+  const cutVideo = files.find(f => f.kind === "video" && /\.vcut\./.test(f.name));
+  const xml = files.find(f => /\.fcpxml$/.test(f.name));
+  const fmt = s => s == null ? "" : `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
+  const tr = st.transitions || {};
+  card.append(h("h3", {}, ico("video"), "剪辑审阅",
+    h("span", { class: "badge ok" }, `${fmt(st.duration)} → ${fmt(st.output_duration)}`),
+    h("span", { class: "badge" }, `画面 ${st.cuts} 刀（硬切 ${tr.cut || 0} · 叠化 ${tr.fade || 0} · 推近 ${tr.zoom || 0}）`),
+    st.muted ? h("span", { class: "badge run" }, `静音 ${st.muted} 处`) : null,
+    st.kept ? h("span", { class: "badge warn" }, `放弃 ${st.kept} 处`) : null,
+    h("span", { class: "badge" }, `最短画面 ${st.shortest_shot}s · 每分钟 ${st.cuts_per_min} 刀`),
+    h("span", { class: "badge" }, st.content === "screen" ? "录屏 / 静态画面" : "真人出镜"),
+    xml ? h("a", { class: "btn small", href: xml.url, download: xml.name.split("/").pop(), title: "Final Cut / DaVinci Resolve / Premiere 导入" }, ico("download"), "FCPXML") : null));
+  const vstyle = "width:100%;max-height:300px;background:#000;border-radius:8px";
+  const srcV = h("video", { controls: true, preload: "metadata", src: j.meta?.source_media || "", style: vstyle });
+  const cutV = h("video", { controls: true, preload: "metadata", src: cutVideo?.url || "", style: vstyle });
+  card.append(h("div", { class: "grid", style: "grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:12px" },
+    h("div", { class: "field" }, h("label", {}, "原视频"), srcV), h("div", { class: "field" }, h("label", {}, "剪辑后"), cutV)));
+  let stopAt = null;
+  srcV.addEventListener("timeupdate", () => { if (stopAt != null && srcV.currentTime >= stopAt) { srcV.pause(); stopAt = null; } });
+
+  const s0 = (plan.settings || {}).video || {};
+  const num = (v, w, step) => h("input", { type: "number", step, value: v, style: `width:${w}px;padding:4px 8px` });
+  const minShot = num(s0.min_shot ?? 1.5, 80, "0.1"), maxCuts = num(s0.max_cuts ?? 3, 70, "1");
+  card.append(h("div", { class: "row", style: "margin-bottom:10px;font-size:13px;gap:8px" },
+    h("span", { class: "muted" }, "最短画面段"), minShot, h("span", { class: "muted" }, "秒 · 每 10 秒最多"), maxCuts, h("span", { class: "muted" }, "刀"),
+    h("span", { class: "hint" }, "「自动」的剪点会按这两个值重新取舍；手动指定的不变")));
+
+  const edits = rems.map(r => ({ mode: r.locked ? r.mode : null, transition: r.transition || "auto" }));
+  const small = "width:auto;font-size:12px;padding:3px 24px 3px 8px";
+  const tbody = h("tbody");
+  rems.forEach((r, i) => {
+    if (r.edge) return;
+    const reasons = (r.reasons || []).map(x => (RC_REASONS[x] || [x])[0]).join("、");
+    const [ml, mc] = VC_MODE[r.mode] || [r.mode, ""];
+    const modeSel = h("select", { style: small, onchange: e => { edits[i].mode = e.target.value || null; markDirty(); } },
+      h("option", { value: "" }, `自动（${(VC_MODE[r.auto_mode] || [r.auto_mode])[0]}）`),
+      ["cut", "mute", "keep"].map(m => h("option", { value: m, selected: r.locked && r.mode === m },
+        VC_MODE[m][0] + (m === "mute" && !r.mutable ? "（嘴在动，可能看得出）" : ""))));
+    const trSel = h("select", { style: small, onchange: e => { edits[i].transition = e.target.value; markDirty(); } },
+      [["auto", "自动"], ["cut", "硬切"], ["fade", "叠化"], ["zoom", "推近 / 拉远"]].map(([v, l]) => h("option", { value: v, selected: (r.transition || "auto") === v }, l)));
+    const detail = r.mode === "cut"
+      ? `${VC_TR[r.applied] || ""}${r.jump != null ? ` · 画面差异 ${r.jump}` : ""}${Math.abs(r.shift || 0) >= 0.02 ? ` · 剪点移动 ${Math.round(r.shift * 1000)}ms` : ""}`
+      : (r.why ? VC_WHY[r.why] || r.why : "") + (r.mouth != null ? ` · 嘴部动作 ${r.mouth}` : "");
+    const playSrc = h("button", { class: "icon", type: "button", title: "原视频：这一处前后",
+      onclick: () => { cutV.pause(); srcV.currentTime = Math.max(0, r.start - 1.5); stopAt = r.end + 1.5; srcV.play(); } }, ico("play"));
+    const playCut = r.out_time != null ? h("button", { class: "icon", type: "button", title: "剪辑后：这一刀前后",
+      onclick: () => { srcV.pause(); cutV.currentTime = Math.max(0, r.out_time - 2); cutV.play(); } }, ico("video")) : null;
+    tbody.append(h("tr", {},
+      h("td", { class: "muted", style: "font:12px var(--mono);white-space:nowrap" }, fmt(r.start), h("br"), `${(r.end - r.start).toFixed(2)}s`),
+      h("td", { style: "min-width:240px" }, h("div", {}, h("span", { class: "muted", style: "font-size:12px" }, reasons + "："), r.text), h("div", { class: "hint" }, detail)),
+      h("td", {}, h("span", { class: "badge " + mc }, ml)),
+      h("td", {}, modeSel), h("td", {}, trSel), h("td", { style: "white-space:nowrap" }, playSrc, playCut)));
+  });
+  card.append(h("div", { class: "hint", style: "margin-bottom:6px" }, "剪 = 画面和声音一起剪掉；静音 = 声音换成环境底噪、画面不剪；保留 = 放弃这一刀。转场只对「剪」生效。"),
+    h("div", { class: "tbl", style: "max-height:520px;overflow:auto" }, h("table", {},
+      h("thead", {}, h("tr", {}, ["位置", "内容", "结果", "处理", "转场", ""].map(x => h("th", {}, x)))), tbody)));
+  const sig = () => JSON.stringify(edits) + "|" + minShot.value + "|" + maxCuts.value;
+  const original = sig();
+  const dirty = h("span", { class: "badge warn", style: "display:none" }, "有未生成的修改");
+  function markDirty() { dirty.style.display = sig() !== original ? "" : "none"; }
+  [minShot, maxCuts].forEach(e => e.addEventListener("input", markDirty));
+  const msg = h("span", { style: "font-size:12.5px" });
+  const go = h("button", { class: "btn primary", type: "button", onclick: async () => {
+    go.disabled = true; msg.textContent = "提交中…";
+    try {
+      const video = { min_shot: minShot.value ? parseFloat(minShot.value) : null, max_cuts: maxCuts.value ? parseInt(maxCuts.value) : null };
+      const r = await fetch(`/api/jobs/${j.id}/videocut`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ removals: edits, video }) });
+      const d = await r.json();
+      if (!r.ok) { msg.textContent = d.detail || "提交失败"; return; }
+      store.set("last." + task, d.id); store.set("tab", "vreview");
+      showJob(d.id, box, task);
+    } catch (e) { msg.textContent = "提交失败：" + e; } finally { go.disabled = false; }
+  } }, ico("video"), "按当前选择重新生成");
+  card.append(h("div", { class: "row", style: "margin-top:14px" }, go, dirty, msg, h("span", { class: "hint" }, "不会重新识别；只重新分析画面和渲染")));
   return card;
 }
 
