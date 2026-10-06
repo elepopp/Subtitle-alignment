@@ -19,6 +19,9 @@ What makes AI speech sound less synthetic (``naturalize``):
   "air" a 22 kHz model cannot produce (nothing above 11 kHz otherwise)
 * a little harmonic warmth (soft saturation)
 * emphasised words (<重|...>) are located with CTC and lifted a few dB
+For a translated dub with the original recording (:mod:`.expressive`) each sentence
+takes its emotion from its original line, each speaker keeps their own voice, and
+loudness and in-sentence pauses follow the original instead of being evened out.
 Then the regular voice-over chain (:mod:`subalign.studio`) runs: EQ, de-ess,
 compression, optional reverb / BGM, loudness, export.
 """
@@ -68,6 +71,17 @@ class DubConfig:
     timeline: bool = False
     max_stretch: float = 1.15
     min_stretch: float = 0.93
+    # translated dub with the original recording (:mod:`.expressive`): every sentence uses
+    # its own original line as the emotion reference, weighted between ``emo_floor`` (a
+    # calm line) and ``emo_alpha`` (the most expressive); each speaker has their own voice
+    source_emo: bool = False
+    emo_floor: float = 0.45
+    # sentence loudness follows the original line (offset from the median, capped)
+    # instead of being evened out
+    follow_dynamics: bool = False
+    dynamics_range_db: float = 8.0
+    # pauses inside an original line are re-placed at the matching clause boundary
+    source_pauses: bool = False
 
 
 # ------------------------------------------------------------------ engine worker
@@ -167,12 +181,15 @@ def _now() -> float:
 
 
 def create_project(pdir: Path, script: str, spk: Path, emo: Optional[Path], cfg: DubConfig, title: str = "",
-                   sentences: Optional[List[Dict]] = None, source: Optional[Dict] = None) -> Dict:
+                   sentences: Optional[List[Dict]] = None, source: Optional[Dict] = None,
+                   speakers: Optional[Dict] = None) -> Dict:
     """``script``: the text, raw or already reviewed (markup allowed).  It is always
     normalised (idempotent), so notes / emoji / digits never reach the engine.
 
     ``sentences`` (from a dubbing translation): ``[{"text", "start", "end"}]`` - one
-    segment each, never re-split, with the original timing kept for timeline assembly."""
+    segment each, never re-split, with the original timing kept for timeline assembly;
+    performance data from :func:`.expressive.analyze_source` rides along (``EXPR_KEYS``).
+    ``speakers``: the per-speaker voice references of that analysis."""
     pdir.mkdir(parents=True, exist_ok=True)
     lang = cfg.lang.lower()
     if sentences is None:
@@ -183,9 +200,13 @@ def create_project(pdir: Path, script: str, spk: Path, emo: Optional[Path], cfg:
         script = "\n".join(s["text"] for s in segs)
     proj = {"version": 1, "title": title or "AI 配音", "created": _now(), "spk": str(spk), "emo": str(emo) if emo else None,
             "script": script, "config": asdict(cfg), "mix": None, "final": None, "source": source,
+            "speakers": speakers or {},
             "segments": [dict(s, id=i + 1, status="pending", audio=None, takes=[], qa=None) for i, s in enumerate(segs)]}
     save(pdir, proj)
     return proj
+
+
+EXPR_KEYS = ("speaker", "spk", "emo", "expr", "src_level", "src_pauses")
 
 
 def _timed_segments(sentences: List[Dict], lang: str) -> List[Dict]:
@@ -205,7 +226,7 @@ def _timed_segments(sentences: List[Dict], lang: str) -> List[Dict]:
             pause = round(max(0.1, min(3.0, nxt - s["end"])), 2)
         out.append({"text": t, "tts_text": tts, "pause_after": pause, "emphasis": emph, "paragraph_end": False,
                     "src_start": s.get("start"), "src_end": s.get("end"), "source_text": s.get("source_text"),
-                    "dt_id": s.get("dt_id")})
+                    "dt_id": s.get("dt_id"), **{k: s[k] for k in EXPR_KEYS if s.get(k) is not None}})
     return out
 
 
@@ -471,6 +492,17 @@ def _resample(y: np.ndarray, a: int, b: int) -> np.ndarray:
 
 
 # ------------------------------------------------------------------ synthesis
+def references(proj: Dict, seg: Dict, cfg: DubConfig) -> tuple:
+    """(voice reference, emotion reference, emotion weight) for one sentence: its
+    speaker's voice and its own original line when the project has them."""
+    spk = seg.get("spk") if seg.get("spk") and Path(seg["spk"]).exists() else proj["spk"]
+    if cfg.source_emo and seg.get("emo") and Path(seg["emo"]).exists():
+        hi = cfg.emo_alpha
+        lo = min(cfg.emo_floor, hi)
+        return spk, seg["emo"], round(lo + (hi - lo) * float(seg.get("expr") or 0.0), 3)
+    return spk, proj.get("emo"), cfg.emo_alpha
+
+
 def synth_segment(pdir: Path, sid: int, worker: Optional[TTSWorker] = None) -> Dict:
     """(Re)generate one sentence; with QA it tries up to ``max_tries`` seeds and keeps
     the take with the fewest misread characters."""
@@ -479,6 +511,7 @@ def synth_segment(pdir: Path, sid: int, worker: Optional[TTSWorker] = None) -> D
     cfg = DubConfig(**proj["config"])
     seg = find(proj, sid)
     text, tts_text = seg["text"], seg["tts_text"]
+    spk, emo, alpha = references(proj, seg, cfg)
     (pdir / "seg").mkdir(exist_ok=True)
     takes: List[Dict] = []
     best = None
@@ -486,11 +519,11 @@ def synth_segment(pdir: Path, sid: int, worker: Optional[TTSWorker] = None) -> D
         for _ in range(max(1, cfg.max_tries if cfg.qa else 1)):
             seed = random.randint(1, 2 ** 31 - 1)
             out = pdir / "seg" / f"{sid:04d}_{int(time.time() * 1000) % 10 ** 9:09d}.wav"
-            r = worker.request(cmd="synth", text=tts_text, spk=proj["spk"], emo=proj.get("emo"),
-                               emo_alpha=cfg.emo_alpha, duration_factor=round(1 / max(0.5, min(2.0, cfg.speed)), 4),
+            r = worker.request(cmd="synth", text=tts_text, spk=spk, emo=emo,
+                               emo_alpha=alpha, duration_factor=round(1 / max(0.5, min(2.0, cfg.speed)), 4),
                                seed=seed, out=str(out), lang=cfg.lang)
             take = {"file": f"seg/{out.name}", "seed": seed, "duration": r.get("duration"), "seconds": r.get("seconds"),
-                    "text": text}
+                    "text": text, "emo_alpha": alpha if emo else None}
             if cfg.qa:
                 try:
                     take["qa"] = check_take(out, text, cfg.lang.lower())
@@ -539,17 +572,30 @@ def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
     segs = [s for s in proj["segments"] if s.get("audio")]
     if not segs:
         raise RuntimeError("no generated sentences yet")
-    clips = []
+    from . import expressive
+
+    clips, placed_pauses = [], []
     for s in segs:
         y = trim_take(_load(pdir / s["audio"]))
         if s.get("emphasis"):
             y = emphasize(y, s["text"], s["emphasis"], cfg.emphasis_db, cfg.lang.lower())
+        n_p = 0
+        if cfg.source_pauses and s.get("src_pauses"):
+            y, n_p = expressive.place_pauses(y, s["text"], s["src_pauses"], cfg.lang.lower(), SR)
         clips.append(y)
-    # loudness matching between sentences (capped)
-    louds = [_loudness(c) for c in clips]
-    target = float(np.median([l for l in louds if l > -60] or [-23]))
-    clips = [c * 10 ** (max(-6, min(6, target - l)) / 20) if l > -60 else c for c, l in zip(clips, louds)]
+        placed_pauses.append(n_p)
     timeline = cfg.timeline and all(s.get("src_start") is not None for s in segs)
+    # loudness: evened out (capped), or on a translated dub following the original lines
+    louds = [_loudness(c) for c in clips]
+    if timeline and cfg.follow_dynamics and any(s.get("src_level") is not None for s in segs):
+        gains = expressive.dynamics_gains(louds, [s.get("src_level") for s in segs], cfg.dynamics_range_db)
+    else:
+        target = float(np.median([l for l in louds if l > -60] or [-23]))
+        gains = [max(-6, min(6, target - l)) if l > -60 else 0.0 for l in louds]
+    clips = [c * 10 ** (g / 20) for c, g in zip(clips, gains)]
+    peak = max(float(np.max(np.abs(c))) if len(c) else 0.0 for c in clips)
+    if peak > 0.95:                     # loud lines lifted: scale everything, keep the contrast
+        clips = [c * (0.95 / peak) for c in clips]
     # speaking-rate evening (pitch-preserving); on a timeline every take is fitted to its slot instead
     if cfg.rate_tolerance > 0 and len(clips) > 2 and not timeline:
         rates = [speaking_rate(c, s["text"]) for c, s in zip(clips, segs)]
@@ -560,17 +606,24 @@ def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
                 factor = 1 - dev + math.copysign(cfg.rate_tolerance / 2, dev)   # bring within half the tolerance
                 factor = max(0.95, min(1.05, factor))
                 clips[i] = stretch(c, factor)
-    breaths = harvest_breaths(Path(proj["spk"])) if cfg.breaths else []
-    if breaths:
-        # a breath sits ~24 dB under the voice (the sentences were loudness-matched, the
-        # reference was not)
-        def _rms(x):
-            return float(np.sqrt(np.mean(x ** 2)) + 1e-9)
-        voice = float(np.median([_rms(c[np.abs(c) > 0.02 * np.abs(c).max()]) for c in clips]))
-        breaths = [b * (voice * 10 ** (-24 / 20) / _rms(b)) for b in breaths]
+    # breaths of each sentence's own speaker (their voice reference)
+    breaths: List[List[np.ndarray]] = [[] for _ in segs]
+    if cfg.breaths:
+        refs = [references(proj, s, cfg)[0] for s in segs]
+        found = {r: harvest_breaths(Path(r)) for r in set(refs)}
+        if any(found.values()):
+            # a breath sits ~24 dB under the voice (the sentences were loudness-matched, the
+            # reference was not)
+            def _rms(x):
+                return float(np.sqrt(np.mean(x ** 2)) + 1e-9)
+            voice = float(np.median([_rms(c[np.abs(c) > 0.02 * np.abs(c).max()]) for c in clips]))
+            found = {r: [b * (voice * 10 ** (-24 / 20) / _rms(b)) for b in bs] for r, bs in found.items()}
+            breaths = [found[r] for r in refs]
     tone_lvl = 10 ** (cfg.room_tone_db / 20) if cfg.room_tone_db < 0 else 0.0
     if timeline:
         y, timing = _place_on_timeline(clips, segs, cfg, breaths)
+        for t, g, n_p in zip(timing, gains, placed_pauses):
+            t.update(gain_db=round(g, 1), pauses=n_p)
         return _finish(pdir, proj, y, timing, cfg, tone_lvl, out)
     parts: List[np.ndarray] = [np.zeros(int(0.25 * SR), np.float32)]
     timing = []
@@ -579,8 +632,8 @@ def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
         if i > 0:
             pause = segs[i - 1]["pause_after"] * (1 + rng.uniform(-cfg.pause_jitter, cfg.pause_jitter))
             gap = np.zeros(int(pause * SR), np.float32)
-            if breaths and pause >= 0.4:
-                b = breaths[i % len(breaths)]
+            if breaths[i] and pause >= 0.4:
+                b = breaths[i][i % len(breaths[i])]
                 if len(b) < len(gap) - int(0.1 * SR):
                     end = len(gap) - int(0.06 * SR)
                     gap[end - len(b):end] += b
@@ -604,9 +657,11 @@ def fit_factor(length: float, slot: float, natural: float, cfg: DubConfig) -> fl
 
 
 def _place_on_timeline(clips: List[np.ndarray], segs: List[Dict], cfg: DubConfig,
-                       breaths: List[np.ndarray]) -> tuple:
+                       breaths: List[List[np.ndarray]]) -> tuple:
     """Every sentence starts at its original start time; a take longer than its slot is
-    sped up (at most ``max_stretch``) and, if still too long, pushes the next one later."""
+    sped up (at most ``max_stretch``) and, if still too long, pushes the next one later.
+    ``breaths``: the breaths to use before each sentence ([] = none at all)."""
+    breaths = breaths or [[] for _ in clips]
     gap_min = int(0.08 * SR)
     placed, timing = [], []
     cursor = 0
@@ -619,8 +674,8 @@ def _place_on_timeline(clips: List[np.ndarray], segs: List[Dict], cfg: DubConfig
         if abs(f - 1) >= 0.01:
             c = stretch(c, f)
         at = max(start, cursor + (gap_min if placed else 0))
-        if breaths and placed and at - cursor >= int(0.5 * SR):
-            b = breaths[i % len(breaths)]
+        if breaths[i] and placed and at - cursor >= int(0.5 * SR):
+            b = breaths[i][i % len(breaths[i])]
             if len(b) < at - cursor - int(0.1 * SR):
                 placed.append((at - int(0.06 * SR) - len(b), b))
         placed.append((at, c))

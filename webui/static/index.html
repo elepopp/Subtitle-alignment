@@ -233,6 +233,8 @@ details.sec[open]>summary.sec-title{margin-bottom:12px}
 .dub-row .qa{font-size:11.5px;color:var(--muted);padding:3px 2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dub-row .ops{display:flex;gap:4px;align-items:center;flex-wrap:wrap}
 .dub-row .src{font-size:11.5px;color:var(--faint);padding:2px 2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dub-row .spk{display:inline-block;font:600 10.5px var(--mono);color:var(--accent);background:var(--accent-weak);border-radius:5px;padding:0 5px;margin-right:6px}
+.dub-row .src button.orig{border:0;background:none;color:var(--accent);cursor:pointer;font:inherit;padding:0 4px 0 0}
 /* ---------- font picker (every font shown as a sample of itself) */
 .fp{position:relative}
 .fp-btn{width:100%;display:flex;align-items:center;gap:8px;padding:5px 10px;min-height:38px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);cursor:pointer;font:inherit;color:var(--text);text-align:left}
@@ -2409,11 +2411,28 @@ async function renderDubProject(m, pid) {
   const { voice, natural } = dubParams(st, onset);
   if (P.segments.some(x => x.src_start != null))
     natural.prepend(dubCheck(st, "timeline", "对齐原视频时间轴（翻译配音）", async (k, v) => { await onset(k, v); act(base + "/assemble"); }));
+  // performance carried over from the original (translated dub with the original recording)
+  const remix = async (k, v) => { await onset(k, v); act(base + "/assemble"); };
+  if (P.segments.some(x => x.emo))
+    voice.append(dubCheck(st, "source_emo", "逐句情绪跟随原句（之后生成的句子生效）", onset),
+      dubSlider(st, "emo_floor", "平静句的情绪强度", 0, 1, 0.05, v => Math.round(v * 100) + "%", "越平静的原句越接近这个值，越激动的越接近上面的「情绪强度」", onset));
+  if (P.segments.some(x => x.src_level != null))
+    natural.prepend(dubCheck(st, "follow_dynamics", "响度跟随原句（不再拉平）", remix),
+      dubSlider(st, "dynamics_range_db", "响度起伏上限 (dB)", 0, 12, 1, v => "±" + v, "比原片中位响度高 / 低多少以内照搬", remix));
+  if (P.segments.some(x => (x.src_pauses || []).length))
+    natural.prepend(dubCheck(st, "source_pauses", "句内停顿跟随原句（放在译文对应的逗号处）", remix));
+  const spks = Object.entries(P.speakers || {});
+  const voiceRef = spks.length
+    ? h("div", { class: "field" }, h("label", {}, spks.length > 1 ? `音色：${spks.length} 位说话人各自克隆` : "音色参考 A（取自原声）"),
+        ...spks.map(([k, v]) => h("div", { class: "row", style: "gap:8px;align-items:center" }, h("b", { style: "font:600 12px var(--mono);min-width:24px" }, k),
+          h("audio", { controls: true, src: v.url, style: "flex:1;min-width:0" }), h("span", { class: "muted", style: "font-size:12px" }, `${v.lines} 句`))))
+    : h("div", { class: "field" }, h("label", {}, "音色参考 A"), h("audio", { controls: true, src: P.spk_url }));
+  const emoRef = P.config.source_emo && P.segments.some(x => x.emo)
+    ? h("div", { class: "field" }, h("label", {}, "情绪参考 B"), h("span", { class: "muted" }, "逐句使用原句（每句旁「原句」可试听）"))
+    : h("div", { class: "field" }, h("label", {}, "情绪参考 B"), P.emo_url ? h("audio", { controls: true, src: P.emo_url }) : h("span", { class: "muted" }, "未使用（语气跟随 A）"));
   m.append(h("div", { class: "card" }, h("h3", {}, ico("settings"), "声音与参数",
       h("span", { class: "muted", style: "font-weight:400;font-size:12px" }, "生成参数对之后生成的句子生效；去机械感参数点「重新合成总音频」生效")),
-    h("div", { class: "split" },
-      h("div", { class: "field" }, h("label", {}, "音色参考 A"), h("audio", { controls: true, src: P.spk_url })),
-      h("div", { class: "field" }, h("label", {}, "情绪参考 B"), P.emo_url ? h("audio", { controls: true, src: P.emo_url }) : h("span", { class: "muted" }, "未使用（语气跟随 A）"))),
+    h("div", { class: "split" }, voiceRef, emoRef),
     h("details", { class: "sec" }, h("summary", { class: "sec-title" }, "调整参数", h("span", { class: "sp" }), ico("chev", "chev")),
       voice, h("div", { class: "sec-title", style: "margin-top:14px" }, "去机械感"), natural)));
 
@@ -2453,8 +2472,17 @@ async function renderDubProject(m, pid) {
       if (!t) return alert("总音频里还没有这一句：先合成总音频");
       player.pause(); mixEl.currentTime = t.start; mixEl.play();
     });
+    const origB = s.emo_url ? h("button", { class: "orig", type: "button", title: "试听原句（这一句的情绪参考）" }, "▶ 原句") : null;
+    if (origB) origB.addEventListener("click", () => {
+      if (playing === "o" + s.id && !player.paused) { player.pause(); return; }
+      mixEl.pause(); player.src = s.emo_url; player.play(); playing = "o" + s.id;
+    });
+    const multi = Object.keys(P.speakers || {}).length > 1;
+    const srcLine = s.source_text || origB ? h("div", { class: "src", title: s.source_text || "" },
+      multi && s.speaker ? h("span", { class: "spk" }, s.speaker) : null, origB,
+      s.source_text ? "原文：" + s.source_text : "", s.expr != null ? h("span", { class: "muted", title: "原句的表现力：偏离这位说话人平时的音量 / 音高 / 起伏的程度" }, ` · 表现力 ${Math.round(s.expr * 100)}%`) : null) : null;
     const el = h("div", { class: "dub-row" }, h("span", { class: "idx" }, s.id), badge,
-      h("div", { style: "min-width:0" }, tx, qa, s.source_text ? h("div", { class: "src", title: s.source_text }, "原文：" + s.source_text) : null), pause,
+      h("div", { style: "min-width:0" }, tx, qa, srcLine), pause,
       h("div", { class: "ops" }, playB, locB, regenB, takes));
     const r = { el, badge, tx, pause, qa, takes, playB, locB, regenB, seg: s, sig: "" };
     rows.set(s.id, r);
@@ -2482,6 +2510,8 @@ async function renderDubProject(m, pid) {
     const tm = (P.mix?.timing || []).find(x => x.id === s.id);
     if (tm && tm.src_start != null && (tm.late > 0.05 || Math.abs(tm.tempo - 1) > 0.01))
       r.qa.prepend(h("span", { class: tm.late > 0.3 ? "err" : "muted" }, (Math.abs(tm.tempo - 1) > 0.01 ? `语速 ×${tm.tempo} ` : "") + (tm.late > 0.05 ? `比原句晚 ${tm.late}s ` : "") + "· "));
+    if (tm && (tm.pauses || Math.abs(tm.gain_db || 0) >= 3))
+      r.qa.prepend(h("span", { class: "muted" }, (tm.pauses ? `停顿 +${tm.pauses} ` : "") + (Math.abs(tm.gain_db || 0) >= 3 ? `响度 ${tm.gain_db > 0 ? "+" : ""}${tm.gain_db} dB ` : "") + "· "));
     const tk = s.takes || [];
     r.takes.style.display = tk.length > 1 ? "" : "none";
     r.takes.innerHTML = "";
@@ -2806,7 +2836,9 @@ async function renderDtProject(m, pid) {
   const dst = Object.assign({ speed: 1.0, emo_alpha: 0.8, qa: true, max_tries: 3, breaths: true, room_tone_db: -66, pause_jitter: 0.1,
     rate_tolerance: 0.06, deharsh_db: 2, air: 0.4, warmth: 0.25, emphasis_db: 3 }, store.get("dub.cfg", {}));
   const timed = P.sentences.some(s => s.start != null);
-  const useSrc = { v: !!P.has_voice }, tl = { v: timed };
+  const useSrc = { v: !!P.has_voice }, tl = { v: timed }, ex = { v: store.get("dt.expressive", true) }, dia = { v: store.get("dt.diarize", true) };
+  const nSpk = h("select", { style: "width:auto", title: "说话人数（自动 = 按声音聚类）" },
+    [[0, "人数：自动"], [1, "1 人"], [2, "2 人"], [3, "3 人"], [4, "4 人"], [5, "5 人"]].map(([v, l]) => h("option", { value: v }, l)));
   const A = refPicker("音色参考 A" + (P.has_voice ? "（可选）" : "（必填）"), P.has_voice ? "不选则直接用原音频里的说话人声音" : "要克隆的声音：5-15 秒干净人声");
   const B = refPicker("情绪参考 B（可选）", "想模仿的语气 / 情绪");
   const { voice } = dubParams(dst, () => store.set("dub.cfg", dst));
@@ -2818,10 +2850,13 @@ async function renderDtProject(m, pid) {
     if (!DT_TTS.has(C.target.split("-")[0]) && !confirm("IndexTTS-2.5 不支持这个语言，仍然尝试？")) return;
     const fd = new FormData();
     fd.append("use_source", useSrc.v ? "true" : "false"); fd.append("timeline", tl.v ? "true" : "false");
+    const exOn = ex.v && P.has_voice && tl.v;
+    fd.append("expressive", exOn ? "true" : "false"); fd.append("diarize", dia.v ? "true" : "false"); fd.append("speakers", nSpk.value);
+    store.set("dt.expressive", ex.v); store.set("dt.diarize", dia.v);
     if (a.file) fd.append("spk", a.file); else if (a.rec) fd.append("spk_recording", a.rec);
     if (b.file) fd.append("emo", b.file); else if (b.rec) fd.append("emo_recording", b.rec);
     fd.append("config", JSON.stringify(dst)); fd.append("title", (P.title || "音频翻译") + ` · ${C.target}`);
-    dubBtn.disabled = true; dubMsg.textContent = "创建配音项目…";
+    dubBtn.disabled = true; dubMsg.textContent = exOn ? "分离人声、分析原声（说话人 / 每句情绪 / 响度 / 停顿），长视频要几分钟…" : "创建配音项目…";
     try { const d = await api(base + "/to-dubbing", fd); store.set("dub.project", d.id); go("dubbing"); }
     catch (e) { dubMsg.textContent = ""; alert(e.message); dubBtn.disabled = false; }
   });
@@ -2830,6 +2865,11 @@ async function renderDtProject(m, pid) {
     h("div", { class: "row", style: "gap:18px;margin-bottom:10px" },
       P.has_voice ? chk(useSrc, "用原音频里的声音（克隆原说话人）") : null,
       chk(tl, timed ? "对齐原视频时间轴（每句从原句开始处说，超时自动微调语速）" : "对齐原时间轴（这份文稿没有时间轴）", !timed)),
+    P.has_voice && timed ? h("div", { class: "row", style: "gap:18px;margin-bottom:10px;align-items:center" },
+      chk(ex, "表演跟随原片：每句以原句为情绪参考，响度起伏和句内停顿照原片"),
+      chk(dia, "区分说话人（每人分别克隆）"), nSpk) : null,
+    P.has_voice && timed ? h("div", { class: "hint", style: "margin:-4px 0 10px" },
+      "上传音色 A 时所有人都用 A 的声音；上传情绪 B 时每句改用 B 的语气。都不传 = 完全照原片。") : null,
     h("div", { class: "split" }, A.el, B.el),
     h("details", { class: "sec", style: "margin-top:10px" }, h("summary", { class: "sec-title" }, "生成参数", h("span", { class: "sp" }), ico("chev", "chev")), voice),
     (P.dubbing || []).length ? h("div", { class: "hint", style: "margin-top:8px" }, "已创建的配音：", P.dubbing.map(id => h("a", { href: "#", style: "margin-left:8px", onclick: e => { e.preventDefault(); store.set("dub.project", id); go("dubbing"); } }, id))) : null,
