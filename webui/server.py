@@ -903,6 +903,16 @@ def _tts_enqueue(pid: str, sids: List[int], mix: bool = True) -> None:
         st["auto_mix"] = mix or st.get("auto_mix", False)
 
 
+def _dub_rel_url(pid: str, path: Optional[str]) -> Optional[str]:
+    """URL of a file inside the project (references are stored as absolute paths)."""
+    if not path:
+        return None
+    try:
+        return f"/dub/{pid}/" + Path(path).resolve().relative_to((DUB_DIR / pid).resolve()).as_posix()
+    except ValueError:
+        return None
+
+
 def _dub_view(pid: str) -> Dict[str, Any]:
     from subalign.tts import dubbing
 
@@ -915,6 +925,7 @@ def _dub_view(pid: str) -> Dict[str, Any]:
         elif s.get("status") == "running" and st.get("running") != s["id"]:
             s["status"] = "error" if not s.get("audio") else "done"     # interrupted by a restart
         s["url"] = f"/dub/{pid}/{s['audio']}?v={s.get('updated', 0)}" if s.get("audio") else None
+        s["emo_url"] = _dub_rel_url(pid, s.get("emo"))
         for t in s.get("takes", []):
             t["url"] = f"/dub/{pid}/{t['file']}"
     if proj.get("mix"):
@@ -922,6 +933,8 @@ def _dub_view(pid: str) -> Dict[str, Any]:
     proj.update(id=pid, busy=bool(st.get("queued")) or st.get("running") is not None, running=st.get("running"),
                 error=st.get("error"), spk_url=f"/dub/{pid}/ref/{Path(proj['spk']).name}",
                 emo_url=f"/dub/{pid}/ref/{Path(proj['emo']).name}" if proj.get("emo") else None)
+    for k, v in (proj.get("speakers") or {}).items():
+        v["url"] = _dub_rel_url(pid, v.get("ref"))
     return proj
 
 
@@ -1634,15 +1647,26 @@ def _source_voice(proj: Dict[str, Any], dst: Path) -> Path:
 @app.post("/api/dubtrans/projects/{pid}/to-dubbing")
 async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[UploadFile] = File(None),
                         spk_recording: str = Form(""), emo: Optional[UploadFile] = File(None), emo_recording: str = Form(""),
-                        config: str = Form("{}"), title: str = Form(""), timeline: bool = Form(True), start: bool = Form(True)):
-    """The translation -> an AI voice-over project (one sentence each, original timing kept)."""
-    from subalign.tts import dubbing
+                        config: str = Form("{}"), title: str = Form(""), timeline: bool = Form(True), start: bool = Form(True),
+                        expressive: bool = Form(True), diarize: bool = Form(True), speakers: int = Form(0),
+                        separate: bool = Form(True)):
+    """The translation -> an AI voice-over project (one sentence each, original timing kept).
+
+    ``expressive`` (with the original recording and timing): each speaker is cloned
+    separately and every sentence takes its emotion from its own original line; loudness
+    and in-sentence pauses follow the original (:mod:`subalign.tts.expressive`).  An
+    uploaded voice A replaces the per-speaker voices, an emotion B the per-line emotion.
+    Without a vocals stem the original is separated first (``separate``; cached and
+    reused by the translated video), so music does not end up in the references."""
+    import asyncio
+
+    from subalign.tts import dubbing, expressive as expr
 
     proj = _dt_get(pid)
     if _dt_state.get(pid, {}).get("busy"):
         raise HTTPException(409, "还在翻译，请等翻译完成")
     sents = [{"text": s.get("translation") or "", "start": s.get("start"), "end": s.get("end"), "source_text": s["text"],
-              "dt_id": s["id"]}
+              "dt_id": s["id"], "speaker": s.get("speaker")}
              for s in proj["sentences"] if (s.get("translation") or "").strip()]
     if not sents:
         raise HTTPException(400, "还没有译文")
@@ -1652,13 +1676,46 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
         raise HTTPException(400, f"config: {e}")
     did = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
     ddir = DUB_DIR / did
+    src = proj["source"]
+    src_audio = next((Path(p) for p in (src.get("vocals_path"), src.get("media_path")) if p and Path(p).exists()), None)
+    timed = timeline and all(s["start"] is not None for s in sents)
+    speakers_info: Dict[str, Any] = {}
     try:
         spk_p = await _ref_audio(ddir / "ref", spk, spk_recording)
-        if spk_p is None:
-            if not use_source:
-                raise HTTPException(400, "请上传或选择音色参考 A")
-            spk_p = _source_voice(proj, ddir / "ref")
         emo_p = await _ref_audio(ddir / "ref", emo, emo_recording)
+        if spk_p is None and not use_source:
+            raise HTTPException(400, "请上传或选择音色参考 A")
+        voice_refs, emo_refs = spk_p is None, emo_p is None
+        ana = None
+        if expressive and timed and src_audio is not None and (voice_refs or emo_refs):
+            media = src.get("media_path")
+            if separate and not (src.get("vocals_path") and Path(src["vocals_path"]).exists()) and media and Path(media).exists():
+                from subalign.dubvideo import separate_background
+
+                try:
+                    ollama.unload_all()                 # separation needs the GPU
+                    stems = await asyncio.to_thread(separate_background, Path(media), DT_DIR / pid / "stems", "auto")
+                    src_audio = stems["vocals"]
+                except Exception:                       # analyse the full mix then
+                    log.exception("vocal separation for the performance analysis failed")
+            try:
+                ana = await asyncio.to_thread(
+                    expr.analyze_source, sents, src_audio, ddir / "ref",
+                    expr.ExprConfig(diarize=diarize, n_speakers=speakers or None), voice_refs=voice_refs, emo_refs=emo_refs)
+            except Exception:                       # fall back to one voice / one tone
+                log.exception("analysis of the original performance failed")
+        if ana is not None:
+            for s, a in zip(sents, ana["sentences"]):
+                s.update({k: v for k, v in a.items() if v is not None})
+            speakers_info = ana["speakers"]
+            cd.setdefault("source_emo", emo_refs)
+            cd.setdefault("follow_dynamics", True)
+            cd.setdefault("source_pauses", True)
+        else:
+            expressive = False
+        if spk_p is None:
+            first = next(iter(speakers_info.values()), None)
+            spk_p = Path(first["ref"]) if first else _source_voice(proj, ddir / "ref")
         spk_p, emo_p = _trim_reference(spk_p), _trim_reference(emo_p) if emo_p else None
     except BaseException:
         shutil.rmtree(ddir, ignore_errors=True)         # no half-made project in the list
@@ -1666,9 +1723,12 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
     tgt = proj["config"].get("target", "en").lower()
     cd.update(lang=TTS_LANG.get(tgt, tgt.split("-")[0].upper()),
               timeline=bool(timeline and all(s["start"] is not None for s in sents)))
+    if not expressive:
+        cd.update(source_emo=False, follow_dynamics=False, source_pauses=False)
     cfg = dubbing.DubConfig(**{k: v for k, v in cd.items() if k in dubbing.DubConfig.__dataclass_fields__})
     dp = dubbing.create_project(ddir, "", spk_p, emo_p, cfg, title or proj.get("title", ""), sentences=sents,
-                                source={"dubtrans": pid, "media_url": _dt_view(pid).get("media_url")})
+                                source={"dubtrans": pid, "media_url": _dt_view(pid).get("media_url")},
+                                speakers=speakers_info)
     with _dt_lock:
         p2 = _dt_get(pid)
         p2.setdefault("dubbing", []).append(did)
