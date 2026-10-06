@@ -30,6 +30,8 @@ if not exist tools\index-tts\.venv\Scripts\python.exe (
   popd
 )
 .venv\Scripts\python.exe webui\download_models.py || goto :err
+rem free-for-commercial-use subtitle fonts: packages in fonts\*.zip + English fonts (Google Fonts)
+.venv\Scripts\python.exe webui\install_fonts.py || echo 字体库未生成（不影响其他功能）
 echo 完成。运行 start.bat 打开测试台。
 pause
 exit /b 0

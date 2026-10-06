@@ -288,6 +288,254 @@ def sentences_from_text(text: str, lang: str) -> List[Dict]:
     return [{"id": i + 1, "text": t, "start": None, "end": None, "times": []} for i, t in enumerate(out)]
 
 
+# ------------------------------------------------------------------ re-segmentation (subtitles -> whole sentences)
+# Subtitle cues (auto-generated ones especially) end wherever the caption box was
+# full, mid-sentence; rolling captions repeat the previous line.  Translating cue by
+# cue duplicates and garbles the text, so the cues only give the timing: they are
+# turned into one word stream and cut again into whole sentences.
+_END_CHARS = ".!?。！？…"
+_CLAUSE_CHARS = ",;:，；：、—"
+_CLOSERS = "\"'”’)）」』】]"
+_ABBREV = {"mr.", "mrs.", "ms.", "dr.", "st.", "vs.", "etc.", "e.g.", "i.e.", "jr.", "sr.", "prof.", "no."}
+
+
+def _plain_end(text: str) -> str:
+    return text.rstrip(_CLOSERS)
+
+
+def _overlap(prev: List[str], cur: List[str], min_k: int = 3) -> int:
+    """Rolling captions: how many leading keys of ``cur`` repeat the end of ``prev``."""
+    for k in range(min(len(prev), len(cur)), 0, -1):
+        if (k >= min_k or k == len(cur)) and prev[-k:] == cur[:k]:
+            return k
+    return 0
+
+
+def timeline_tokens(doc) -> List[Dict[str, Any]]:
+    """Every word of the document once, with a time: the recognised time when the
+    token has one, else the cue's time spread over its words by syllables."""
+    from ..text.tokenize import normalize_key, syllable_weight, tokenize
+
+    out: List[Dict[str, Any]] = []
+    prev_keys: List[str] = []
+    for ln in doc.lines:
+        text = ln.text.strip()
+        if not text or ln.start is None or ln.end is None:
+            continue
+        toks = tokenize(text)
+        keys = [normalize_key(t.text) for t in toks]
+        k = _overlap(prev_keys, keys)
+        prev_keys = keys
+        timed = k == 0 and len(ln.tokens) == len(toks) and all(t.start is not None and t.end is not None for t in ln.tokens)
+        if timed:
+            src = [(t.text, t.start, t.end, t.space_after) for t in ln.tokens]
+        else:
+            toks = toks[k:]
+            if not toks:
+                continue
+            w = [syllable_weight(t) for t in toks]
+            tot, acc, src = sum(w) or 1.0, 0.0, []
+            for t, x in zip(toks, w):
+                a = ln.start + (ln.end - ln.start) * acc / tot
+                acc += x
+                src.append((t.text, a, ln.start + (ln.end - ln.start) * acc / tot, t.space_after))
+        if out and src:
+            out[-1]["space"] = out[-1]["space"] or not (_is_cjk(out[-1]["text"][-1]) and _is_cjk(src[0][0][0]))
+        for i, (t, a, b, sp) in enumerate(src):
+            out.append({"text": t, "key": normalize_key(t), "start": round(float(a), 3), "end": round(float(b), 3),
+                        "space": bool(sp) if i < len(src) - 1 else False, "speaker": ln.speaker})
+    return out
+
+
+def _is_end(toks: List[Dict], i: int) -> bool:
+    t = toks[i]
+    txt = _plain_end(t["text"])
+    if not txt or txt[-1] not in _END_CHARS:
+        return False
+    if txt.lower() in _ABBREV:
+        return False
+    if i == len(toks) - 1:
+        return True
+    # "5.5" is tokenised as "5." + "5" with no space: not a sentence end
+    return t["space"] or _is_cjk(txt[-1]) or txt[-1] in "。！？…"
+
+
+def is_punctuated(toks: List[Dict], lang: str) -> bool:
+    """Enough sentence punctuation to trust it (auto captions often have none)."""
+    ends = sum(1 for i in range(len(toks)) if _is_end(toks, i))
+    per = len(toks) / max(1, ends)
+    return ends > 0 and per <= (90 if base_lang(lang) in CJK_LANGS else 45)
+
+
+def _bounds_by_punctuation(toks: List[Dict]) -> List[int]:
+    return [i + 1 for i in range(len(toks) - 1) if _is_end(toks, i)]
+
+
+def _bounds_by_pause(toks: List[Dict], gap: float = 0.6) -> List[int]:
+    return [i + 1 for i in range(len(toks) - 1) if toks[i + 1]["start"] - toks[i]["end"] >= gap]
+
+
+SEG_SCHEMA = {"type": "object", "properties": {"sentences": {"type": "array", "items": {"type": "string"}}},
+              "required": ["sentences"], "additionalProperties": False}
+
+
+def _bounds_by_llm(toks: List[Dict], client: LLMClient, lang: str, window: int = 220) -> Tuple[List[int], Dict[int, str]]:
+    """The LLM restores sentence boundaries (and punctuation) on windows of the word
+    stream; its sentences are aligned back to the words, so timing is kept.  The last
+    sentence of a window is re-done with the next window (it may be cut)."""
+    from difflib import SequenceMatcher
+
+    from ..text.tokenize import normalize_key, tokenize
+
+    cjk = base_lang(lang) in CJK_LANGS
+    system = ("You restore sentence boundaries in a speech transcript (automatic captions, no reliable punctuation). "
+              "Split the text into complete sentences and add normal punctuation and capitalization. Keep every word, "
+              "in order, exactly as given: never add, remove, reorder, correct or translate words. A sentence is a "
+              "complete thought (usually 5-30 words), never a single word.\n"
+              'Example - input: "so today we talk about fonts do you like them i do" -> '
+              '{"sentences": ["So today we talk about fonts.", "Do you like them?", "I do."]}\n'
+              'Reply with JSON only: {"sentences": ["...", "..."]}')
+    bounds, texts = [], {}
+    i0 = 0
+    while i0 < len(toks):
+        i1 = min(len(toks), i0 + window)
+        chunk = toks[i0:i1]
+        joined = "".join(t["text"] + ("" if cjk or not t["space"] else " ") for t in chunk).strip()
+        sents: List[str] = []
+        for attempt in range(2):
+            try:
+                data = client.complete_json(system, joined, SEG_SCHEMA)
+                got = [str(s) for s in (data.get("sentences") if isinstance(data, dict) else data) or [] if str(s).strip()]
+            except Exception as e:
+                log.warning("sentence restoration failed (%s)", e)
+                continue
+            n_words = [len(tokenize(x)) for x in got]
+            # small models sometimes return every word as a "sentence"
+            if got and sum(n_words) / len(got) >= (4 if cjk else 3) and sum(1 for n in n_words if n < 2) <= len(got) // 4:
+                sents = got
+                break
+            log.warning("sentence restoration returned %d fragments for %d words; %s", len(got), len(chunk),
+                        "retrying" if attempt == 0 else "splitting at pauses")
+        if not sents or (len(sents) < 2 and i1 < len(toks)):
+            # nothing usable: cut this window at its pauses and move on
+            local = _bounds_by_pause(chunk)
+            bounds += [i0 + b for b in local]
+            if i1 >= len(toks):
+                break
+            i0 += local[-1] if local else len(chunk)
+            continue
+        keys = [t["key"] for t in chunk]
+        skeys, owner = [], []
+        for si, s in enumerate(sents):
+            for t in tokenize(s):
+                k = normalize_key(t.text)
+                if k:
+                    skeys.append(k)
+                    owner.append(si)
+        sm = SequenceMatcher(None, keys, skeys, autojunk=False)
+        first: Dict[int, int] = {}                     # sentence -> its first matched word in the chunk
+        for blk in sm.get_matching_blocks():
+            for q in range(blk.size):
+                first.setdefault(owner[blk.b + q], blk.a + q)
+        starts = sorted(set(first.values()))
+        last = i1 >= len(toks)
+        use = starts if last else starts[:-1]           # the window's last sentence is redone
+        for si, s in enumerate(sents):
+            if si in first and (last or first[si] != starts[-1]):
+                texts[i0 + first[si]] = s.strip()
+        bounds += [i0 + b for b in use if b > 0]
+        if last:
+            break
+        nxt = i0 + (starts[-1] if starts and starts[-1] > 0 else len(chunk))
+        i0 = nxt if nxt > i0 else i1
+    return sorted(set(b for b in bounds if 0 < b < len(toks))), texts
+
+
+def _split_long(seg: List[Dict], max_seconds: float, max_units: int) -> List[List[Dict]]:
+    if len(seg) < 4 or (seg[-1]["end"] - seg[0]["start"] <= max_seconds and len(seg) <= max_units):
+        return [seg]
+    mid = len(seg) / 2
+    clause = [i + 1 for i in range(1, len(seg) - 2) if _plain_end(seg[i]["text"])[-1:] in _CLAUSE_CHARS]
+    if clause:
+        cut = min(clause, key=lambda i: abs(i - mid))
+    else:
+        gaps = [(seg[i + 1]["start"] - seg[i]["end"], i + 1) for i in range(1, len(seg) - 2)]
+        g, cut = max(gaps) if gaps else (0, int(mid))
+        if g < 0.15:
+            cut = int(mid)
+    return _split_long(seg[:cut], max_seconds, max_units) + _split_long(seg[cut:], max_seconds, max_units)
+
+
+def resegment(doc, lang: str, client: Optional[LLMClient] = None, max_seconds: float = 15.0,
+              hard_gap: float = 1.5) -> List[Dict]:
+    """Subtitle / recognised document -> whole sentences with word timing.  Cue
+    boundaries are ignored; sentence punctuation decides, or (no punctuation) the
+    LLM, or pauses.  A long silence always ends a sentence; overlong sentences are
+    split at a clause; one- or two-word fragments join the next sentence."""
+    toks = timeline_tokens(doc)
+    if not toks:
+        return []
+    cjk = base_lang(lang) in CJK_LANGS
+    texts: Dict[int, str] = {}
+    if is_punctuated(toks, lang):
+        bounds = _bounds_by_punctuation(toks)
+        how = "punctuation"
+    elif client is not None:
+        bounds, texts = _bounds_by_llm(toks, client, lang)
+        how = "llm"
+    else:
+        bounds = _bounds_by_pause(toks)
+        how = "pauses"
+    bounds = sorted(set(bounds) | {i + 1 for i in range(len(toks) - 1) if toks[i + 1]["start"] - toks[i]["end"] >= hard_gap}
+                    | {i + 1 for i in range(len(toks) - 1) if toks[i + 1]["speaker"] != toks[i]["speaker"]})
+    segs, a = [], 0
+    for b in bounds + [len(toks)]:
+        if b > a:
+            segs.append((a, toks[a:b]))
+            a = b
+    # tiny fragments ("So," "Okay.") join the next sentence when it follows right away
+    merged: List[Tuple[int, List[Dict]]] = []
+    for i, (a, seg) in enumerate(segs):
+        if merged and len(merged[-1][1]) <= (3 if cjk else 2) and seg[0]["start"] - merged[-1][1][-1]["end"] < 0.5 \
+                and seg[-1]["end"] - merged[-1][1][0]["start"] <= max_seconds and seg[0]["speaker"] == merged[-1][1][0]["speaker"]:
+            merged[-1] = (merged[-1][0], merged[-1][1] + seg)
+        else:
+            merged.append((a, seg))
+    max_units = 60 if cjk else 40
+    out = []
+    for a, seg in merged:
+        pieces = _split_long(seg, max_seconds, max_units)
+        for p, piece in enumerate(pieces):
+            text, times = "", []
+            for t in piece:
+                times.append([len(text), t["start"]])
+                text += t["text"] + (" " if t["space"] and not cjk else "")
+            text = text.strip()
+            llm_text = texts.get(a) if len(pieces) == 1 else None
+            if llm_text and how == "llm":
+                from ..text.tokenize import normalize_key, tokenize
+
+                from difflib import SequenceMatcher
+
+                lt = tokenize(llm_text)
+                lk = [normalize_key(x.text) for x in lt]
+                sm = SequenceMatcher(None, lk, [t["key"] for t in piece], autojunk=False)
+                if lk == [t["key"] for t in piece]:      # only when no word was dropped / changed
+                    match = {blk.a + q: blk.b + q for blk in sm.get_matching_blocks() for q in range(blk.size)}
+                    text, off, times, last = llm_text, 0, [], 0
+                    for xi, x in enumerate(lt):
+                        k = llm_text.find(x.text, off)
+                        last = match.get(xi, last)
+                        times.append([max(0, k), piece[min(last, len(piece) - 1)]["start"]])
+                        off = max(off, k + len(x.text))
+            out.append({"text": text, "start": piece[0]["start"], "end": piece[-1]["end"], "times": times,
+                        "speaker": piece[0]["speaker"]})
+    for i, s in enumerate(out):
+        s["id"] = i + 1
+    log.info("re-segmented %d words into %d sentences (by %s)", len(toks), len(out), how)
+    return out
+
+
 # ------------------------------------------------------------------ anchors
 _NOUN_FLAGS = {"n", "nr", "nrt", "nrfg", "ns", "nt", "nz", "eng", "nw"}
 _PROPER = {"nr", "nrt", "nrfg", "ns", "nt", "nz", "eng"}
@@ -734,13 +982,24 @@ def _generate(batch: List[Dict], all_sents: List[Dict], client: LLMClient, cfg: 
                 continue
             seen.add(c["text"])
             m = measure(s, c["text"], c["terms"], cfg)
-            if not -0.5 <= m["len_dev"] <= 0.6:             # merged a neighbouring line / dropped half of it
-                s["discarded"] = s.get("discarded", 0) + 1
-                continue
             m["round"] = rnd
+            # far off the budget: merged a neighbouring line / dropped half of it.  Short lines get
+            # a few syllables of slack ("I like the fonts." -> 3 syllables, any translation is +100 %)
+            off = m["syllables"] - s["target"]["syllables"]
+            if not -0.5 <= m["len_dev"] <= 0.6 and abs(off) > 4:
+                s["discarded"] = s.get("discarded", 0) + 1
+                rej = s.setdefault("rejected", [])
+                rej.append(m)
+                rej.sort(key=lambda x: abs(x["len_dev"]))
+                del rej[3:]
+                continue
             s.setdefault("candidates", []).append(m)
         if cands:
             s.pop("error", None)
+        if not s.get("candidates") and s.get("rejected"):
+            # never leave a sentence without a translation: the closest rejected one, marked
+            keep = dict(s["rejected"][0], over_budget=True)
+            s["candidates"] = [keep]
         rank(s)
 
 
@@ -813,29 +1072,41 @@ def detect_anchors(sents: List[Dict], client: Optional[LLMClient], cfg: IsoConfi
 
 def translate(sents: List[Dict], client: LLMClient, cfg: IsoConfig, ids: Optional[Sequence[int]] = None,
               hints: Optional[Dict[int, str]] = None,
-              progress: Optional[Callable[[str, int, int], None]] = None) -> List[Dict]:
+              progress: Optional[Callable[[str, int, int], None]] = None,
+              stop: Optional[Callable[[], bool]] = None) -> List[Dict]:
     """Translate (``ids``: only these sentences, adding to their candidates).  ``progress(stage, done, total)``
-    is called after every batch; the sentence dicts are updated in place."""
+    is called when a stage starts and after every batch; ``stop()`` is checked between batches (what is
+    done so far is kept).  The sentence dicts are updated in place."""
     hints = hints or {}
     todo = [s for s in sents if ids is None or s["id"] in set(ids)]
     note = progress or (lambda *_: None)
+    halt = stop or (lambda: False)
     pending = [s for s in todo if s.get("anchors") is None]
     if pending:
-        note("anchors", 0, len(todo))
+        note("anchors", 0, len(pending))
         detect_anchors(pending, client, cfg)
     bs = max(1, cfg.batch_size)
+    note("translate", 0, len(todo))
     for b0 in range(0, len(todo), bs):
+        if halt():
+            return sents
         _generate(todo[b0:b0 + bs], sents, client, cfg, 0, hints)
         note("translate", min(len(todo), b0 + bs), len(todo))
     for r in range(1, cfg.rounds + 1):
         bad = [s for s in todo if not (best(s) or {}).get("ok")]
         if not bad:
             break
+        note(f"refine{r}", 0, len(bad))
         for b0 in range(0, len(bad), bs):
+            if halt():
+                return sents
             _generate(bad[b0:b0 + bs], sents, client, cfg, r, hints)
             note(f"refine{r}", min(len(bad), b0 + bs), len(bad))
     if cfg.judge:
+        note("judge", 0, len(todo))
         for b0 in range(0, len(todo), bs * 2):
+            if halt():
+                return sents
             _judge(todo[b0:b0 + bs * 2], client, cfg)
             note("judge", min(len(todo), b0 + bs * 2), len(todo))
     return sents

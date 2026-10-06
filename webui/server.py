@@ -522,8 +522,32 @@ def fonts():
     out = []
     for names, fn in SYSTEM_FONTS:
         if (_FONT_DIR / fn).exists():
-            out.append({"names": names, "url": f"/fonts/sys/{fn}"})
+            out.append({"names": names, "url": f"/fonts/sys/{fn}", "preview": f"/fonts/preview/sys/{fn}.png"})
     return out
+
+
+@app.get("/fonts/preview/{kind}/{name}.png")
+def font_preview(kind: str, name: str):
+    """The sample text set in the font (for the font picker), rendered once and cached."""
+    from subalign.fontlib import FontLibrary, preview_png, render_preview
+
+    try:
+        if kind == "free":
+            lib = FontLibrary.load()
+            e = next((x for x in lib.entries if x.id == name), None)
+            if e is None:
+                raise HTTPException(404)
+            return FileResponse(preview_png(e), media_type="image/png")
+        if kind == "sys" and name in {f for _, f in SYSTEM_FONTS} and (_FONT_DIR / name).exists():
+            out = paths.WORK / "font_previews" / f"{name}.png"
+            if not out.exists():
+                render_preview(_FONT_DIR / name, out, "字幕预览 Subtitle 123")
+            return FileResponse(out, media_type="image/png")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(404, f"preview failed: {e}")
+    raise HTTPException(404)
 
 
 @app.get("/fonts/sys/{fn}")
@@ -1158,7 +1182,8 @@ def _dt_run(pid: str, llm: Dict[str, Any], ids: Optional[List[int]] = None, hint
     from subalign.translate import isochrony
 
     st = _dt_state.setdefault(pid, {})
-    st.update(busy=True, stage="start", done=0, total=0, error=None)
+    st.update(busy=True, stage="start", done=0, total=0, error=None, t0=time.time(), stage_t0=time.time(), stop=False,
+              stopped=False)
     try:
         with _dt_lock:
             proj = _dt_live[pid] = _dt_get(pid)
@@ -1176,22 +1201,42 @@ def _dt_run(pid: str, llm: Dict[str, Any], ids: Optional[List[int]] = None, hint
                 raise RuntimeError(f"语音识别失败：{job.error}")
             doc = _job_document(job)
             with _dt_lock:
-                proj["sentences"] = isochrony.sentences_from_document(doc, merge=proj.get("merge", True))
+                proj["sentences"] = [] if proj.get("merge", True) else isochrony.sentences_from_document(doc, merge=False)
+                (_dt_dir(pid) / "input").mkdir(exist_ok=True)
+                (_dt_dir(pid) / "input" / "cues.json").write_text(json.dumps(doc.to_dict(), ensure_ascii=False), encoding="utf-8")
+                proj["source"]["cues"] = "input/cues.json"
                 proj["source"]["media_path"] = job.argv[1] if len(job.argv) > 1 else None
                 vocals = sorted((job.workdir / "output" / "work").glob("*vocals*.wav")) if (job.workdir / "output" / "work").exists() else []
                 proj["source"]["vocals_path"] = str(vocals[0]) if vocals else None
                 _dt_save(pid, proj)
-        if not proj["sentences"]:
-            raise RuntimeError("没有可翻译的句子")
         cfg = _dt_cfg(proj)
         if ((llm or {}).get("provider") or "ollama") == "ollama":
             _gpu_for_local_llm()
         client = _llm_client(llm)
+        if not proj["sentences"] and src.get("cues"):
+            # cue boundaries are only timing: whole sentences again (LLM when there is no punctuation)
+            from subalign.models import Document
+
+            st["stage"], st["stage_t0"] = "segment", time.time()
+            doc = Document.from_dict(json.loads((_dt_dir(pid) / src["cues"]).read_text(encoding="utf-8")))
+            sents = isochrony.resegment(doc, cfg.source, client)
+            with _dt_lock:
+                proj["sentences"] = sents
+                _dt_save(pid, proj)
+        if not proj["sentences"]:
+            raise RuntimeError("没有可翻译的句子")
+
+        st["plan"] = (["segment"] if src.get("cues") else []) + ["anchors", "translate"] + \
+            [f"refine{r}" for r in range(1, cfg.rounds + 1)] + (["judge"] if cfg.judge else [])
 
         def progress(stage: str, done: int, total: int) -> None:
+            if stage != st.get("stage"):
+                st["stage_t0"] = time.time()
             st.update(stage=stage, done=done, total=total)
             _dt_save(pid, proj)
-        isochrony.translate(proj["sentences"], client, cfg, ids=ids, hints=hints, progress=progress)
+        isochrony.translate(proj["sentences"], client, cfg, ids=ids, hints=hints, progress=progress,
+                            stop=lambda: bool(st.get("stop")))
+        st["stopped"] = bool(st.get("stop"))
         st["stage"] = "done"
         _dt_save(pid, proj)
     except Exception as e:
@@ -1227,16 +1272,66 @@ def _dt_view(pid: str) -> Dict[str, Any]:
     proj = dict(_dt_get(pid))
     st = _dt_state.get(pid, {})
     src = proj.get("source") or {}
-    media = None
+    media = src.get("media_url")
     if src.get("job"):
         job = _load_job(src["job"])
         media = job.meta.get("media") if job else None
         if job and job.status in ("queued", "running") and not proj.get("sentences"):
             st = dict(st, job_status=job.status, job_log=job.log[-3:])
+    now = time.time()
+    proj["progress"] = {"plan": st.get("plan") or [], "elapsed": round(now - st["t0"], 1) if st.get("t0") else None,
+                        "stage_elapsed": round(now - st["stage_t0"], 1) if st.get("stage_t0") else None,
+                        "stopping": bool(st.get("stop")) and bool(st.get("busy")), "stopped": bool(st.get("stopped"))}
     proj.update(id=pid, busy=bool(st.get("busy")), stage=st.get("stage"), done=st.get("done"), total=st.get("total"),
                 error=st.get("error"), job_status=st.get("job_status"), job_log=st.get("job_log"), media_url=media,
                 has_voice=bool(src.get("media_path")))
+    vinfo = _dt_video_info(src.get("media_path"))
+    proj["video_info"] = vinfo
+    proj["is_video"] = bool(vinfo)
+    proj["dub_info"] = [d for d in (_dub_summary(x) for x in proj.get("dubbing") or []) if d]
+    vs = []
+    for v in proj.get("videos") or []:
+        v = dict(v, **(_dv_state.get(v["id"]) or {}))
+        if v.get("status") in ("queued", "running") and v["id"] not in _dv_state:
+            v.update(status="error", error="服务重启，任务已中断，请重新生成")
+        v["urls"] = {k: f"/dt/{pid}/video/{v['id']}/{name}" for k, name in (v.get("files") or {}).items()}
+        vs.append(v)
+    proj["videos"] = vs
     return proj
+
+
+_video_info_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+
+
+def _dt_video_info(path: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Source video facts (None for audio-only sources), cached per file."""
+    if not path or not Path(path).exists():
+        return None
+    if path not in _video_info_cache:
+        try:
+            from subalign.dubvideo import probe
+
+            i = probe(Path(path))
+            _video_info_cache[path] = {"width": i["width"], "height": i["height"], "fps": round(float(i["fps"]), 3),
+                                       "codec": i["codec"], "bit_rate": i["bit_rate"], "container": i["ext"],
+                                       "duration": round(i["duration"], 2)}
+        except Exception:
+            _video_info_cache[path] = None
+    return _video_info_cache[path]
+
+
+def _dub_summary(did: str) -> Optional[Dict[str, Any]]:
+    f = DUB_DIR / Path(did).name / "project.json"
+    if not f.exists():
+        return None
+    try:
+        p = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    segs = p.get("segments", [])
+    return {"id": did, "title": p.get("title"), "n": len(segs), "done": sum(1 for s in segs if s.get("audio")),
+            "mix": bool(p.get("mix")), "timeline": bool(p.get("config", {}).get("timeline")),
+            "built": (p.get("mix") or {}).get("built")}
 
 
 @app.post("/api/dubtrans/projects")
@@ -1295,17 +1390,68 @@ async def dt_create(source: str = Form("text"), media: Optional[UploadFile] = Fi
             from subalign.formats import read
 
             try:
-                sents = isochrony.sentences_from_document(read(tp), merge=merge)
+                doc = read(tp)
             except Exception as e:
                 raise HTTPException(400, f"字幕解析失败：{e}")
+            if not doc.lines:
+                raise HTTPException(400, "字幕里没有内容")
+            if merge:
+                # re-cut into whole sentences in the background (may need the LLM)
+                (pdir / "input" / "cues.json").write_text(json.dumps(doc.to_dict(), ensure_ascii=False), encoding="utf-8")
+                src["cues"] = "input/cues.json"
+                sents = []
+            else:
+                sents = isochrony.sentences_from_document(doc, merge=False)
         else:
             sents = isochrony.sentences_from_text(text_content, src_lang)
         src.update(name=name)
+        # the video / recording the subtitles belong to (optional): original voice + translated video
+        mp = await _dt_media(pdir, media, recording)
+        if mp is not None:
+            src.update(media_path=str(mp), media_url=f"/dt/{pid}/input/media/{mp.name}")
     proj = {"version": 1, "title": title or (src.get("name") or "音频翻译"), "created": time.time(), "merge": merge,
             "config": {k: getattr(cfg, k) for k in isochrony.IsoConfig.__dataclass_fields__}, "source": src,
             "sentences": sents, "llm": {k: llm_d.get(k, "") for k in ("provider", "model", "base_url")}, "dubbing": []}
     _dt_save(pid, proj)
     _dt_start(pid, llm_d)
+    return _dt_view(pid)
+
+
+async def _dt_media(pdir: Path, media: Optional[UploadFile], recording: str) -> Optional[Path]:
+    dst = pdir / "input" / "media"
+    if media is not None and media.filename:
+        dst.mkdir(parents=True, exist_ok=True)
+        for old in dst.glob("*"):
+            old.unlink()
+        return await _save_upload(media, dst)
+    if recording:
+        rp = RECORDINGS / Path(recording).name
+        if not rp.exists():
+            raise HTTPException(400, "recording not found")
+        dst.mkdir(parents=True, exist_ok=True)
+        for old in dst.glob("*"):
+            old.unlink()
+        shutil.copy(rp, dst / rp.name)
+        return dst / rp.name
+    return None
+
+
+@app.post("/api/dubtrans/projects/{pid}/media")
+async def dt_attach_media(pid: str, media: Optional[UploadFile] = File(None), recording: str = Form("")):
+    """Attach the video / recording a subtitle- or script-based translation belongs to
+    (its timing must match the subtitles): original voice for cloning + translated video."""
+    pdir = _dt_dir(pid)
+    with _dt_lock:
+        proj = _dt_get(pid)
+        if proj["source"].get("job"):
+            raise HTTPException(400, "这个项目来自语音识别，已经有原视频 / 音频")
+    mp = await _dt_media(pdir, media, recording)
+    if mp is None:
+        raise HTTPException(400, "请选择视频或音频文件")
+    with _dt_lock:
+        proj = _dt_get(pid)
+        proj["source"].update(media_path=str(mp), media_url=f"/dt/{pid}/input/media/{mp.name}")
+        _dt_save(pid, proj)
     return _dt_view(pid)
 
 
@@ -1374,6 +1520,16 @@ def dt_sentence(pid: str, sid: int, body: Dict[str, Any] = Body(...)):
     return _dt_view(pid)
 
 
+@app.post("/api/dubtrans/projects/{pid}/stop")
+def dt_stop(pid: str):
+    """Stop after the current batch; everything translated so far is kept."""
+    st = _dt_state.get(pid)
+    if not st or not st.get("busy"):
+        raise HTTPException(409, "没有在运行")
+    st["stop"] = True
+    return _dt_view(pid)
+
+
 @app.post("/api/dubtrans/projects/{pid}/retranslate")
 def dt_retranslate(pid: str, body: Dict[str, Any] = Body({})):
     """Translate again: ``ids`` (default all); ``reset`` drops the earlier candidates."""
@@ -1420,7 +1576,19 @@ def dt_export(pid: str, fmt: str = "srt"):
     if fmt in ("srt", "srt2"):
         if not any(s.get("start") is not None for s in ss):
             raise HTTPException(400, "文稿没有时间轴，请导出 txt")
-        body, name = isochrony.to_srt(ss, bilingual=fmt == "srt2"), f"{pid}.{tgt}.srt"
+        # whole sentences can be long: broken into readable cues like the burned-in subtitles
+        from subalign.dubvideo import subtitle_document
+        from subalign.formats import write
+        from subalign.segment.layout import get_layout
+        from subalign.segment.linebreak import segment_document
+
+        vi = _dt_video_info(proj["source"].get("media_path")) or {"width": 1920, "height": 1080}
+        doc = subtitle_document([{"text": s.get("translation") or "", "original": s["text"], "start": s.get("start"),
+                                  "end": s.get("end")} for s in ss], bilingual=fmt == "srt2", language=tgt)
+        doc = segment_document(doc, get_layout(f"{vi['width']}x{vi['height']}"))
+        from subalign.dubvideo import clean_srt
+
+        body, name = clean_srt(write(doc, "srt", bilingual=fmt == "srt2")), f"{pid}.{tgt}.srt"
     elif fmt == "txt":
         body, name = "\n".join(s.get("translation") or "" for s in ss) + "\n", f"{pid}.{tgt}.txt"
     elif fmt == "json":
@@ -1473,7 +1641,8 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
     proj = _dt_get(pid)
     if _dt_state.get(pid, {}).get("busy"):
         raise HTTPException(409, "还在翻译，请等翻译完成")
-    sents = [{"text": s.get("translation") or "", "start": s.get("start"), "end": s.get("end"), "source_text": s["text"]}
+    sents = [{"text": s.get("translation") or "", "start": s.get("start"), "end": s.get("end"), "source_text": s["text"],
+              "dt_id": s["id"]}
              for s in proj["sentences"] if (s.get("translation") or "").strip()]
     if not sents:
         raise HTTPException(400, "还没有译文")
@@ -1508,6 +1677,210 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
         ollama.unload_all()                         # the translation model would crowd out IndexTTS
         _tts_enqueue(did, [s["id"] for s in dp["segments"]])
     return {"id": did}
+
+
+# ------------------------------------------------------------------ translated video (视频翻译)
+_dv_queue: "queue.Queue[tuple]" = queue.Queue()
+_dv_state: Dict[str, Dict[str, Any]] = {}            # video id -> {"status", "stage", "progress", "error"}
+
+
+def _dv_sentences(proj: Dict[str, Any], did: Optional[str]) -> List[Dict[str, Any]]:
+    """Subtitle lines: the translation, timed where the dubbed sentence is actually
+    spoken (mix timing); without a mix, at the original sentence times."""
+    by_id = {s["id"]: s for s in proj["sentences"]}
+    if did:
+        f = DUB_DIR / Path(did).name / "project.json"
+        if f.exists():
+            dp = json.loads(f.read_text(encoding="utf-8"))
+            timing = {t["id"]: t for t in (dp.get("mix") or {}).get("timing", [])}
+            out = []
+            for seg in dp.get("segments", []):
+                t = timing.get(seg["id"])
+                if not t:
+                    continue
+                src = by_id.get(seg.get("dt_id"))
+                out.append({"text": (src or {}).get("translation") or seg["text"],
+                            "original": (src or {}).get("text") or seg.get("source_text"),
+                            "start": t["start"], "end": t["end"]})
+            if out:
+                return out
+    return [{"text": s.get("translation") or "", "original": s["text"], "start": s.get("start"), "end": s.get("end")}
+            for s in proj["sentences"] if s.get("translation") and s.get("start") is not None]
+
+
+def _default_style_spec(proj: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Default subtitle style of a translation: free-for-commercial-use fonts for the
+    target language (main row) and the source language (second row)."""
+    from subalign.fontlib import FontLibrary
+
+    spec = dict(preset_style("default"), font_size=None)
+    lib = FontLibrary.load()
+    cfg = (proj or {}).get("config") or {}
+    for key, lang in (("main", cfg.get("target", "zh")), ("translation", cfg.get("source", "zh"))):
+        e = lib.default_for(lang)
+        if e:
+            spec[key] = dict(spec[key], fontname=e.family)
+    return spec
+
+
+def _dv_ass(pid: str, did: Optional[str], bilingual: bool, spec: Dict[str, Any]) -> str:
+    from subalign.dubvideo import subtitle_document
+    from subalign.formats.ass import write_ass
+    from subalign.segment.layout import get_layout
+    from subalign.segment.linebreak import segment_document
+
+    proj = _dt_get(pid)
+    vi = _dt_video_info(proj["source"].get("media_path")) or {"width": 1920, "height": 1080}
+    doc = subtitle_document(_dv_sentences(proj, did), bilingual, proj["config"].get("target", ""))
+    layout = get_layout(f"{vi['width']}x{vi['height']}", int(spec["font_size"]) if spec.get("font_size") else None)
+    from subalign.dubvideo import clean_ass
+    from subalign.fontlib import FontLibrary
+
+    text = clean_ass(write_ass(segment_document(doc, layout), style=_style_from_spec(spec), layout=layout,
+                               bilingual=bilingual))
+
+    # the fonts that will really be burned in (free-for-commercial-use, covering the text)
+    return FontLibrary.load().enforce(text, proj["config"].get("target", ""), proj["config"].get("source", ""))[0]
+
+
+@app.get("/api/dubtrans/projects/{pid}/style")
+def dt_style(pid: str, dub: str = "", bilingual: bool = False):
+    from subalign.style import PRESETS
+
+    proj = _dt_get(pid)
+    return {"spec": proj.get("style") or _default_style_spec(proj), "targets": [{"ass": "preview.ass"}], "presets": list(PRESETS)}
+
+
+@app.post("/api/dubtrans/projects/{pid}/style")
+def dt_style_render(pid: str, dub: str = "", bilingual: bool = False, body: Dict[str, Any] = Body(...)):
+    """Preview the subtitles with ``spec``; ``save`` keeps it for the next video."""
+    spec = body.get("spec") or _default_style_spec(_dt_get(pid))
+    text = _dv_ass(pid, dub or None, bilingual, spec)
+    if not body.get("save"):
+        return {"ass": text, "target": "preview.ass"}
+    with _dt_lock:
+        proj = _dt_get(pid)
+        proj["style"] = spec
+        _dt_save(pid, proj)
+    return {"ass": text, "target": "preview.ass", "written": ["字幕样式"]}
+
+
+@app.get("/api/dubtrans/projects/{pid}/preview.ass")
+def dt_preview_ass(pid: str, dub: str = "", bilingual: bool = False):
+    from fastapi.responses import PlainTextResponse
+
+    proj = _dt_get(pid)
+    return PlainTextResponse(_dv_ass(pid, dub or None, bilingual, proj.get("style") or _default_style_spec(proj)))
+
+
+@app.get("/api/fonts/free")
+def free_fonts():
+    """The free-for-commercial-use font library (translated subtitles use only these)."""
+    from subalign.fontlib import FontLibrary
+
+    lib = FontLibrary.load()
+    out = [{"names": list(dict.fromkeys([e.family, e.display] + e.names)), "url": f"/fonts/free/{e.id}",
+            "preview": f"/fonts/preview/free/{e.id}.png",
+            "display": e.display, "scripts": e.scripts, "license": e.license, "verified": e.verified, "note": e.note}
+           for e in lib.entries]
+    return out
+
+
+@app.get("/fonts/free/{fid}")
+def free_font_file(fid: str):
+    from subalign.fontlib import FontLibrary
+
+    lib = FontLibrary.load()
+    e = next((x for x in lib.entries if x.id == fid), None)
+    if fid == "fallback":
+        e = lib.default_for("zh")
+    if e is None:
+        raise HTTPException(404)
+    p = lib.path(e)
+    return FileResponse(p, media_type="font/collection" if p.suffix.lower() in (".ttc", ".otc") else "font/ttf")
+
+
+def _dv_worker() -> None:
+    from subalign.dubvideo import ComposeConfig, VideoSpec, compose
+
+    while True:
+        pid, vid = _dv_queue.get()
+        st = _dv_state.setdefault(vid, {})
+        st.update(status="running", stage="start", progress=0.0, error=None)
+        try:
+            proj = _dt_get(pid)
+            v = next(x for x in proj.get("videos", []) if x["id"] == vid)
+            dp = DUB_DIR / Path(v["dub"]).name
+            if not (dp / "mix.wav").exists():
+                raise RuntimeError("这个配音项目还没有合成总音频")
+            c = dict(v["compose"])
+            spec = VideoSpec(**{k: x for k, x in (c.pop("spec", None) or {}).items() if k in VideoSpec.__dataclass_fields__})
+            cfg = ComposeConfig(**{k: x for k, x in c.items() if k in ComposeConfig.__dataclass_fields__}, spec=spec)
+            style_spec = v.get("style") or _default_style_spec(proj)
+            ollama.unload_all()                        # separation needs the GPU
+            title = "".join(ch for ch in (proj.get("title") or "video") if ch.isalnum() or ch in "-_ ").strip()[:40] or "video"
+            res = compose(Path(proj["source"]["media_path"]), dp / "mix.wav", _dv_sentences(proj, v["dub"]),
+                          DT_DIR / pid / "video" / vid, cfg, stems_dir=DT_DIR / pid / "stems",
+                          style=_style_from_spec(style_spec),
+                          font_size=int(style_spec["font_size"]) if style_spec.get("font_size") else None,
+                          source_language=proj["config"].get("source", ""),
+                          base=f"{title}.{proj['config'].get('target', 'tr')}", language=proj["config"].get("target", ""),
+                          progress=lambda stage, f: st.update(stage=stage, progress=round(f, 3)))
+            files = {k: p.name for k, p in res["files"].items()}
+            with _dt_lock:
+                p2 = _dt_get(pid)
+                for x in p2.get("videos", []):
+                    if x["id"] == vid:
+                        x.update(status="done", files=files, report=res["report"], finished=time.time())
+                _dt_save(pid, p2)
+            st.update(status="done", stage="done", progress=1.0)
+        except Exception as e:
+            log.exception("translated video %s failed", vid)
+            st.update(status="error", error=f"{type(e).__name__}: {e}"[:1500])
+            with _dt_lock:
+                p2 = _dt_get(pid)
+                for x in p2.get("videos", []):
+                    if x["id"] == vid:
+                        x.update(status="error", error=st["error"])
+                _dt_save(pid, p2)
+
+
+@app.post("/api/dubtrans/projects/{pid}/video")
+def dt_video(pid: str, body: Dict[str, Any] = Body(...)):
+    """Make the translated video: ``dub`` (voice-over project), ``compose`` (background /
+    subtitles / output spec); the current subtitle style is used."""
+    proj = _dt_get(pid)
+    if not _dt_video_info(proj["source"].get("media_path")):
+        raise HTTPException(400, "源文件不是视频")
+    did = body.get("dub") or ""
+    info = _dub_summary(did)
+    if not info or did not in (proj.get("dubbing") or []):
+        raise HTTPException(400, "请选择这个翻译生成的配音项目")
+    if not info["mix"]:
+        raise HTTPException(400, "配音还没有合成总音频（在 AI 配音页面生成完全部句子）")
+    vid = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
+    with _dt_lock:
+        p2 = _dt_get(pid)
+        same = [v for v in p2.get("videos", []) if v["id"] in _dv_state
+                and _dv_state[v["id"]].get("status") in ("queued", "running") and v["dub"] == did
+                and v.get("compose") == (body.get("compose") or {}) and v.get("style") == p2.get("style")]
+        if same:
+            raise HTTPException(409, "相同设置的翻译视频已经在生成中，请等它完成")
+        p2.setdefault("videos", []).append({"id": vid, "created": time.time(), "dub": did, "status": "queued",
+                                            "compose": body.get("compose") or {}, "style": p2.get("style")})
+        _dt_save(pid, p2)
+    _dv_state[vid] = {"status": "queued", "stage": "queued", "progress": 0.0, "error": None}
+    _dv_queue.put((pid, vid))
+    return _dt_view(pid)
+
+
+@app.get("/dt/{pid}/{rel:path}")
+def dt_file(pid: str, rel: str):
+    base = _dt_dir(pid).resolve()
+    p = (base / rel).resolve()
+    if base not in p.parents or not p.is_file():
+        raise HTTPException(404)
+    return FileResponse(p)
 
 
 # ------------------------------------------------------------------ info / status
@@ -1705,6 +2078,7 @@ def main() -> None:
     _install_model_cache()
     threading.Thread(target=_worker, daemon=True).start()
     threading.Thread(target=_tts_worker, daemon=True).start()
+    threading.Thread(target=_dv_worker, daemon=True).start()
     if not a.no_ollama and paths.OLLAMA_EXE.exists():
         threading.Thread(target=ollama.ensure_server, daemon=True).start()
     print(f"subalign 功能测试台: http://{a.host}:{a.port}", flush=True)
