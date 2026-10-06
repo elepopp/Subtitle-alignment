@@ -286,7 +286,9 @@ def to_engine(t: str, engine: str = "indextts2.5") -> Tuple[str, List[str]]:
 
 
 def split_segments(t: str, max_chars: int = 60, min_chars: int = 4, comma_pause: float = 0.25,
-                   sentence_pause: float = 0.45, paragraph_pause: float = 0.8) -> List[Segment]:
+                   sentence_pause: float = 0.45, paragraph_pause: float = 0.8, lang: str = "zh") -> List[Segment]:
+    if not is_cjk_lang(lang):
+        return _split_latin(t, int(max_chars * 2.5), comma_pause, sentence_pause, paragraph_pause)
     segs: List[Segment] = []
     held = set()                      # segments followed by an explicit pause: never merged across it
     paras = [p.strip() for p in re.split(r"\n\s*\n|\n", t) if p.strip()]
@@ -349,6 +351,62 @@ def _plain_len(s: str) -> int:
     return len(re.sub(r"[\s，。！？；：、…—]", "", _MARK.sub(lambda m: m["val"] if m["tag"] in ("重",) else m["tag"], s)))
 
 
+def _split_latin(t: str, max_chars: int, comma_pause: float, sentence_pause: float,
+                 paragraph_pause: float) -> List[Segment]:
+    """Sentences end at . ! ? ; followed by a space (not 3.5 / e.g. inside a word);
+    long ones are split at commas, one- or two-word sentences join their neighbour."""
+    segs: List[Segment] = []
+    paras = [p.strip() for p in t.split("\n") if p.strip()]
+    for pi, para in enumerate(paras):
+        parts = re.split(r"(<(?:停|pause)\|[\d.]+>)", para)
+        sentences: List[Tuple[str, Optional[float]]] = []
+        for part in parts:
+            m = re.fullmatch(r"<(?:停|pause)\|([\d.]+)>", part)
+            if m:
+                if sentences:
+                    txt = sentences[-1][0]
+                    if txt[-1] not in LATIN_END + LATIN_CLAUSE:
+                        txt += ","
+                    sentences[-1] = (txt, float(m[1]))
+                continue
+            for x in re.split(r"(?<=[.!?;])\s+(?=\S)", part):
+                if x.strip():
+                    sentences.append((x.strip(), None))
+        for x, explicit in sentences:
+            pieces = [x]
+            if len(x) > max_chars:
+                pieces, cur = [], ""
+                for c in re.findall(r"[^,:;—]+[,:;—]?\s*", x):
+                    if cur and len(cur + c) > max_chars:
+                        pieces.append(cur.strip())
+                        cur = c
+                    else:
+                        cur += c
+                if cur.strip():
+                    pieces.append(cur.strip())
+            for k, piece in enumerate(pieces):
+                last = k == len(pieces) - 1
+                if piece[-1] not in LATIN_END + LATIN_CLAUSE:
+                    piece += "." if last else ","
+                tts, emph = to_engine(piece)
+                pause = comma_pause if not last else (explicit if explicit is not None else sentence_pause)
+                segs.append(Segment(piece, tts, pause, emph))
+        if segs:
+            segs[-1].paragraph_end = True
+            if pi < len(paras) - 1 and segs[-1].pause_after < paragraph_pause:
+                segs[-1].pause_after = paragraph_pause
+    merged: List[Segment] = []
+    for sg in segs:
+        if merged and len(sg.text.split()) < 3 and not merged[-1].paragraph_end:
+            prev = merged[-1]
+            prev.text = prev.text + " " + sg.text
+            prev.tts_text, prev.emphasis = to_engine(prev.text)
+            prev.pause_after, prev.paragraph_end = sg.pause_after, sg.paragraph_end
+        else:
+            merged.append(sg)
+    return merged
+
+
 def _split_long(s: str, max_chars: int) -> List[str]:
     """Split at clause punctuation into pieces close to max_chars."""
     clauses = re.findall(rf"[^{CLAUSE}]+[{CLAUSE}]?", s)
@@ -364,9 +422,44 @@ def _split_long(s: str, max_chars: int) -> List[str]:
     return out
 
 
-def normalize(text: str, remove_notes: bool = True) -> str:
+def is_cjk_lang(lang: Optional[str]) -> bool:
+    return (lang or "zh").lower().split("-")[0] in ("zh", "yue", "ja", "ko")
+
+
+# ------------------------------------------------------------------ alphabetic languages
+SYMBOLS_LATIN = {"&": " and ", "@": " at ", "#": "", "*": "", "~": ", ", "～": ", ", "|": ", ", "_": " ", "^": "",
+                 "→": ", ", "←": ", ", "=": " equals ", "×": " times ", "≈": " about "}
+PUNCT_HW = {"，": ",", "。": ".", "？": "?", "！": "!", "；": ";", "：": ":", "（": "(", "）": ")", "、": ",",
+            "“": "", "”": "", "‘": "'", "’": "'", "\"": "", "《": "", "》": "", "「": "", "」": ""}
+LATIN_END = ".!?;"
+LATIN_CLAUSE = ",:;—"
+
+
+def normalize_latin(t: str) -> str:
+    """English / European scripts: half-width punctuation, spaced properly.  Numbers are
+    left as digits - the engine reads them out in the right language."""
+    t, keep = _protect(t)
+    for a, b in SYMBOLS_LATIN.items():
+        t = t.replace(a, b)
+    for a, b in PUNCT_HW.items():
+        t = t.replace(a, b)
+    t = re.sub(r"\.{3,}|…+", "…", t)                     # kept apart from full stops until the end
+    t = re.sub(r"\s+([,.!?;:])", r"\1", t)
+    t = re.sub(r"([,!?;:])(?=[^\s\d])", r"\1 ", t)
+    t = re.sub(r"(?<![\d.])\.(?=[A-Za-z])", ". ", t)
+    t = re.sub(r"([,;:])[,;:]+", r"\1", t)
+    t = re.sub(r"([.!?])[,.;:]+", r"\1", t)
+    t = re.sub(r"…\s*", "... ", t)
+    t = re.sub(r"[ \t]+", " ", t)
+    t = "\n".join(x.strip() for x in t.split("\n"))
+    return _restore(t, keep).strip()
+
+
+def normalize(text: str, remove_notes: bool = True, lang: str = "zh") -> str:
     """clean -> numbers -> symbols -> punctuation (markup is kept)."""
     t = clean(text, remove_notes)
+    if not is_cjk_lang(lang):
+        return normalize_latin(t)
     t, keep = _protect(t)
     t = normalize_numbers(t)
     t = _restore(t, keep)
@@ -374,8 +467,9 @@ def normalize(text: str, remove_notes: bool = True) -> str:
     return normalize_punct(t)
 
 
-def prepare(text: str, remove_notes: bool = True, max_chars: int = 60, **pauses) -> Dict:
+def prepare(text: str, remove_notes: bool = True, max_chars: int = 60, lang: str = "zh", **pauses) -> Dict:
     """Full pipeline: clean -> symbols -> numbers -> punctuation -> segments."""
-    t = normalize(text, remove_notes)
-    segs = split_segments(t, max_chars=max_chars, **pauses)
-    return {"text": t, "segments": [asdict(s) for s in segs], "polyphones": polyphones(t)}
+    t = normalize(text, remove_notes, lang)
+    segs = split_segments(t, max_chars=max_chars, lang=lang, **pauses)
+    poly = polyphones(t) if (lang or "zh").lower().startswith(("zh", "yue")) else []
+    return {"text": t, "segments": [asdict(s) for s in segs], "polyphones": poly}

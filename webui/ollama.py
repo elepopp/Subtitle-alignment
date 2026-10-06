@@ -28,6 +28,23 @@ def models() -> list:
         return []
 
 
+def unload_all() -> int:
+    """Unload every loaded model now (Ollama keeps them in VRAM for minutes) so that
+    the TTS / ASR models fit on the GPU again."""
+    n = 0
+    try:
+        with urllib.request.urlopen(URL + "/api/ps", timeout=3) as r:
+            loaded = [m["name"] for m in json.loads(r.read().decode()).get("models", [])]
+        for name in loaded:
+            req = urllib.request.Request(URL + "/api/generate", data=json.dumps({"model": name, "keep_alive": 0}).encode(),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=30):
+                n += 1
+    except Exception:
+        pass
+    return n
+
+
 def ensure_server() -> bool:
     if running():
         return True
