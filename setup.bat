@@ -19,6 +19,16 @@ if not exist tools\ffmpeg\bin\ffmpeg.exe (
   curl -L -o tools\ffmpeg.zip https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-8.1.zip || goto :err
   tar -xf tools\ffmpeg.zip -C tools && del tools\ffmpeg.zip && move tools\ffmpeg-n8.1-latest-win64-gpl-8.1 tools\ffmpeg
 )
+rem AI 配音: IndexTTS-2.5 in its own environment (it needs torch 2.8 / transformers 4.52)
+if not exist tools\index-tts\pyproject.toml (
+  git clone https://github.com/index-tts/index-tts.git tools\index-tts || goto :err
+  git -C tools\index-tts checkout d9e41aac89fd00b3d71497fddb287b7f24613712 || goto :err
+)
+if not exist tools\index-tts\.venv\Scripts\python.exe (
+  pushd tools\index-tts
+  uv sync --default-index https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple || (popd & goto :err)
+  popd
+)
 .venv\Scripts\python.exe webui\download_models.py || goto :err
 echo 完成。运行 start.bat 打开测试台。
 pause
