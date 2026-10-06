@@ -865,7 +865,7 @@ def tts_prepare(body: Dict[str, Any] = Body(...)):
     from subalign.tts import textprep
 
     return textprep.prepare(body.get("text", ""), remove_notes=body.get("remove_notes", True),
-                            max_chars=int(body.get("max_chars") or 60))
+                            max_chars=int(body.get("max_chars") or 60), lang=body.get("lang") or "zh")
 
 
 async def _ref_audio(dst: Path, upload: Optional[UploadFile], recording: str, prev: Optional[Path] = None) -> Optional[Path]:
@@ -1037,6 +1037,426 @@ def dub_file(pid: str, rel: str):
     if base not in p.parents or not p.is_file():
         raise HTTPException(404)
     return FileResponse(p)
+
+
+# ------------------------------------------------------------------ dubbing translation (音频翻译)
+# source (recording / video -> recognition, or a subtitle / script) -> translation that keeps
+# the length and where the nouns are heard -> AI voice-over on the original timeline
+DT_DIR = paths.WORK / "dubtrans"
+_dt_lock = threading.RLock()
+_dt_state: Dict[str, Dict[str, Any]] = {}           # project id -> {"busy", "stage", "done", "total", "error"}
+_dt_live: Dict[str, Dict[str, Any]] = {}            # projects being translated (edits go to the same object)
+TTS_LANG = {"zh": "ZH", "zh-cn": "ZH", "zh-tw": "ZH", "zh-hant": "ZH", "yue": "ZH", "en": "EN", "ja": "JA", "es": "ES"}
+
+
+def _dt_dir(pid: str) -> Path:
+    d = DT_DIR / Path(pid).name
+    if not (d / "project.json").exists():
+        raise HTTPException(404, "project not found")
+    return d
+
+
+def _dt_get(pid: str) -> Dict[str, Any]:
+    if pid in _dt_live:
+        return _dt_live[pid]
+    return json.loads((_dt_dir(pid) / "project.json").read_text(encoding="utf-8"))
+
+
+def _dt_save(pid: str, proj: Dict[str, Any]) -> None:
+    with _dt_lock:
+        d = DT_DIR / pid
+        tmp = d / "project.json.tmp"
+        tmp.write_text(json.dumps(proj, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(d / "project.json")
+
+
+def _dt_cfg(proj: Dict[str, Any]):
+    from subalign.translate.isochrony import IsoConfig
+
+    return IsoConfig(**{k: v for k, v in proj["config"].items() if k in IsoConfig.__dataclass_fields__})
+
+
+def _llm_client(llm: Dict[str, Any]):
+    """The page's LLM settings (the key is never written to disk); some randomness so
+    that the candidates differ."""
+    from subalign.llm import make_client
+
+    prov = (llm or {}).get("provider") or "ollama"
+    if prov == "ollama":
+        ollama.ensure_server()
+    return make_client(prov, llm.get("model") or None, llm.get("base_url") or None, llm.get("api_key") or None,
+                       temperature=0.7)
+
+
+def _job_document(job: Job):
+    """The recognised document (json output) of an alignment job."""
+    from subalign.models import Document
+
+    out = job.workdir / "output"
+    media = Path(job.argv[1]).stem if len(job.argv) > 1 else ""
+    cands = [out / f"{media}.json"] + sorted(out.glob("*.json"))
+    for p in cands:
+        if p.exists() and not any(p.name.endswith(x) for x in (".proofread.json", ".studio.json", ".roughcut.json")):
+            d = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(d, dict) and "lines" in d:
+                return Document.from_dict(d)
+    raise RuntimeError("识别结果里没有 json 文档")
+
+
+def _dt_run(pid: str, llm: Dict[str, Any], ids: Optional[List[int]] = None, hints: Optional[Dict[int, str]] = None) -> None:
+    from subalign.translate import isochrony
+
+    st = _dt_state.setdefault(pid, {})
+    st.update(busy=True, stage="start", done=0, total=0, error=None)
+    try:
+        with _dt_lock:
+            proj = _dt_live[pid] = _dt_get(pid)
+        src = proj["source"]
+        if src.get("job") and not proj["sentences"]:
+            st["stage"] = "transcribe"
+            while True:
+                job = _load_job(src["job"])
+                if job is None:
+                    raise RuntimeError("识别任务不存在")
+                if job.status in ("done", "error"):
+                    break
+                time.sleep(1.0)
+            if job.status == "error":
+                raise RuntimeError(f"语音识别失败：{job.error}")
+            doc = _job_document(job)
+            with _dt_lock:
+                proj["sentences"] = isochrony.sentences_from_document(doc, merge=proj.get("merge", True))
+                proj["source"]["media_path"] = job.argv[1] if len(job.argv) > 1 else None
+                vocals = sorted((job.workdir / "output" / "work").glob("*vocals*.wav")) if (job.workdir / "output" / "work").exists() else []
+                proj["source"]["vocals_path"] = str(vocals[0]) if vocals else None
+                _dt_save(pid, proj)
+        if not proj["sentences"]:
+            raise RuntimeError("没有可翻译的句子")
+        cfg = _dt_cfg(proj)
+        if ((llm or {}).get("provider") or "ollama") == "ollama":
+            _gpu_for_local_llm()
+        client = _llm_client(llm)
+
+        def progress(stage: str, done: int, total: int) -> None:
+            st.update(stage=stage, done=done, total=total)
+            _dt_save(pid, proj)
+        isochrony.translate(proj["sentences"], client, cfg, ids=ids, hints=hints, progress=progress)
+        st["stage"] = "done"
+        _dt_save(pid, proj)
+    except Exception as e:
+        log.exception("dub translation %s failed", pid)
+        st["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        with _dt_lock:
+            _dt_live.pop(pid, None)
+        st["busy"] = False
+
+
+def _gpu_for_local_llm() -> None:
+    """A local model needs ~5 GB of VRAM: drop the cached recognition models and stop an
+    idle TTS worker (both reload on demand) - with them loaded Ollama fails with
+    'cudaMalloc failed: out of memory' on an 11 GB card."""
+    from subalign.tts.dubbing import WORKER
+
+    free_models()
+    busy = any(st.get("queued") or st.get("running") is not None for st in _tts_state.values())
+    if not busy and WORKER.proc and WORKER.proc.poll() is None:
+        log.info("stopping the idle TTS worker to make room for the local LLM")
+        WORKER.stop()
+
+
+def _dt_start(pid: str, llm: Dict[str, Any], ids: Optional[List[int]] = None, hints: Optional[Dict[int, str]] = None) -> None:
+    if _dt_state.get(pid, {}).get("busy"):
+        raise HTTPException(409, "正在翻译，请稍候")
+    _dt_state[pid] = {"busy": True, "stage": "start", "done": 0, "total": 0, "error": None}
+    threading.Thread(target=_dt_run, args=(pid, llm, ids, hints), daemon=True).start()
+
+
+def _dt_view(pid: str) -> Dict[str, Any]:
+    proj = dict(_dt_get(pid))
+    st = _dt_state.get(pid, {})
+    src = proj.get("source") or {}
+    media = None
+    if src.get("job"):
+        job = _load_job(src["job"])
+        media = job.meta.get("media") if job else None
+        if job and job.status in ("queued", "running") and not proj.get("sentences"):
+            st = dict(st, job_status=job.status, job_log=job.log[-3:])
+    proj.update(id=pid, busy=bool(st.get("busy")), stage=st.get("stage"), done=st.get("done"), total=st.get("total"),
+                error=st.get("error"), job_status=st.get("job_status"), job_log=st.get("job_log"), media_url=media,
+                has_voice=bool(src.get("media_path")))
+    return proj
+
+
+@app.post("/api/dubtrans/projects")
+async def dt_create(source: str = Form("text"), media: Optional[UploadFile] = File(None), recording: str = Form(""),
+                    job: str = Form(""), text_content: str = Form(""), text_name: str = Form(""),
+                    src_lang: str = Form("zh"), tgt_lang: str = Form("en"), asr_model: str = Form(""),
+                    config: str = Form("{}"), llm: str = Form("{}"), title: str = Form(""), merge: bool = Form(True)):
+    from subalign.translate import isochrony
+
+    try:
+        cfg_d, llm_d = json.loads(config), json.loads(llm)
+    except json.JSONDecodeError as e:
+        raise HTTPException(400, f"JSON: {e}")
+    cfg = isochrony.IsoConfig(**{k: v for k, v in cfg_d.items() if k in isochrony.IsoConfig.__dataclass_fields__})
+    cfg.source, cfg.target = src_lang, tgt_lang
+    if isochrony.base_lang(src_lang) == isochrony.base_lang(tgt_lang):
+        raise HTTPException(400, "源语言和目标语言相同")
+    pid = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+    pdir = DT_DIR / pid
+    pdir.mkdir(parents=True)
+    src: Dict[str, Any] = {"kind": source}
+    sents: List[Dict[str, Any]] = []
+    if source == "media":
+        wd = _new_workdir()
+        if media is not None and media.filename:
+            mp = await _save_upload(media, wd / "input")
+        elif recording:
+            rp = RECORDINGS / Path(recording).name
+            if not rp.exists():
+                raise HTTPException(400, "recording not found")
+            mp = wd / "input" / rp.name
+            shutil.copy(rp, mp)
+        else:
+            raise HTTPException(400, "请上传音频 / 视频")
+        pairs = [["--lang", isochrony.base_lang(src_lang)], ["--mode", "speech"], ["-f", "srt,json"]]
+        if asr_model:
+            pairs.append(["--asr-model", asr_model])
+        argv = _add_flags("align", ["align", str(mp)], pairs, wd, "", "")
+        jid = _enqueue("align", argv, wd, {"media": f"/jobs/{wd.name}/file/input/{mp.name}", "pairs": pairs,
+                                           "glossary": "", "style_json": "", "purpose": "音频翻译"})["id"]
+        src.update(job=jid, name=mp.name)
+    elif source == "job":
+        j = _load_job(job)
+        if j is None or j.task not in ("align", "lyrics"):
+            raise HTTPException(400, "对齐任务不存在")
+        src.update(job=j.id, name=Path(j.argv[1]).name if len(j.argv) > 1 else j.id)
+    else:
+        if not text_content.strip():
+            raise HTTPException(400, "请粘贴或上传字幕 / 文稿")
+        name = Path(text_name or "script.txt").name
+        ext = Path(name).suffix.lower()
+        (pdir / "input").mkdir()
+        tp = pdir / "input" / name
+        tp.write_text(text_content, encoding="utf-8")
+        if ext in (".srt", ".vtt", ".ass", ".ssa", ".lrc", ".json", ".sbv", ".ttml", ".qrc", ".yrc"):
+            from subalign.formats import read
+
+            try:
+                sents = isochrony.sentences_from_document(read(tp), merge=merge)
+            except Exception as e:
+                raise HTTPException(400, f"字幕解析失败：{e}")
+        else:
+            sents = isochrony.sentences_from_text(text_content, src_lang)
+        src.update(name=name)
+    proj = {"version": 1, "title": title or (src.get("name") or "音频翻译"), "created": time.time(), "merge": merge,
+            "config": {k: getattr(cfg, k) for k in isochrony.IsoConfig.__dataclass_fields__}, "source": src,
+            "sentences": sents, "llm": {k: llm_d.get(k, "") for k in ("provider", "model", "base_url")}, "dubbing": []}
+    _dt_save(pid, proj)
+    _dt_start(pid, llm_d)
+    return _dt_view(pid)
+
+
+@app.get("/api/dubtrans/projects")
+def dt_list():
+    out = []
+    for d in sorted(DT_DIR.glob("*/project.json"), reverse=True) if DT_DIR.exists() else []:
+        try:
+            p = json.loads(d.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        ss = p.get("sentences", [])
+        out.append({"id": d.parent.name, "title": p.get("title"), "created": p.get("created"), "n": len(ss),
+                    "src": p["config"].get("source"), "tgt": p["config"].get("target"),
+                    "done": sum(1 for s in ss if s.get("translation")), "ok": sum(1 for s in ss if _dt_ok(s))})
+    return out
+
+
+def _dt_ok(s: Dict[str, Any]) -> bool:
+    c = s.get("candidates") or []
+    i = s.get("choice")
+    return i is not None and 0 <= i < len(c) and bool(c[i].get("ok"))
+
+
+@app.get("/api/dubtrans/projects/{pid}")
+def dt_get(pid: str):
+    _dt_get(pid)
+    return _dt_view(pid)
+
+
+@app.post("/api/dubtrans/projects/{pid}/sentences/{sid}")
+def dt_sentence(pid: str, sid: int, body: Dict[str, Any] = Body(...)):
+    """``choice``: use candidate i; ``text``: own translation; ``regenerate`` (+ ``hint``):
+    more candidates for this sentence."""
+    from subalign.translate import isochrony
+
+    if body.get("regenerate"):
+        with _dt_lock:
+            proj = _dt_get(pid)
+            s = next((x for x in proj["sentences"] if x["id"] == sid), None)
+            if s is None:
+                raise HTTPException(404, "sentence not found")
+            s["locked"] = False
+            _dt_save(pid, proj)
+        hint = (body.get("hint") or "").strip()
+        _dt_start(pid, body.get("llm") or {}, [sid], {sid: hint} if hint else None)
+        return _dt_view(pid)
+    with _dt_lock:
+        proj = _dt_get(pid)
+        s = next((x for x in proj["sentences"] if x["id"] == sid), None)
+        if s is None:
+            raise HTTPException(404, "sentence not found")
+        if "choice" in body:
+            i = int(body["choice"])
+            if not 0 <= i < len(s.get("candidates") or []):
+                raise HTTPException(400, "no such candidate")
+            s["choice"], s["locked"], s["translation"] = i, True, s["candidates"][i]["text"]
+        elif body.get("text", "").strip():
+            if "target" not in s:
+                raise HTTPException(400, "这一句还没有分析完")
+            isochrony.set_custom(s, body["text"], _dt_cfg(proj))
+        elif body.get("auto"):
+            s["locked"] = False
+            isochrony.rank(s)
+        _dt_save(pid, proj)
+    return _dt_view(pid)
+
+
+@app.post("/api/dubtrans/projects/{pid}/retranslate")
+def dt_retranslate(pid: str, body: Dict[str, Any] = Body({})):
+    """Translate again: ``ids`` (default all); ``reset`` drops the earlier candidates."""
+    with _dt_lock:
+        proj = _dt_get(pid)
+        ids = body.get("ids")
+        for s in proj["sentences"]:
+            if ids is None or s["id"] in ids:
+                s["locked"] = False
+                if body.get("reset"):
+                    s.update(candidates=[], choice=None, translation=None)
+        _dt_save(pid, proj)
+    _dt_start(pid, body.get("llm") or {}, ids)
+    return _dt_view(pid)
+
+
+@app.post("/api/dubtrans/projects/{pid}/config")
+def dt_config(pid: str, body: Dict[str, Any] = Body(...)):
+    """Tolerance / candidates / rounds / judge / ratio / instructions; budgets and scores
+    are recomputed locally (no new translation)."""
+    from subalign.translate import isochrony
+
+    with _dt_lock:
+        proj = _dt_get(pid)
+        for k, v in body.items():
+            if k in isochrony.IsoConfig.__dataclass_fields__ and k not in ("source", "target"):
+                proj["config"][k] = v
+        cfg = _dt_cfg(proj)
+        for s in proj["sentences"]:
+            if "target" in s:
+                isochrony.remeasure(s, cfg)
+        _dt_save(pid, proj)
+    return _dt_view(pid)
+
+
+@app.get("/api/dubtrans/projects/{pid}/export")
+def dt_export(pid: str, fmt: str = "srt"):
+    from fastapi.responses import Response
+    from subalign.translate import isochrony
+
+    proj = _dt_get(pid)
+    ss = proj["sentences"]
+    tgt = proj["config"].get("target", "tr")
+    if fmt in ("srt", "srt2"):
+        if not any(s.get("start") is not None for s in ss):
+            raise HTTPException(400, "文稿没有时间轴，请导出 txt")
+        body, name = isochrony.to_srt(ss, bilingual=fmt == "srt2"), f"{pid}.{tgt}.srt"
+    elif fmt == "txt":
+        body, name = "\n".join(s.get("translation") or "" for s in ss) + "\n", f"{pid}.{tgt}.txt"
+    elif fmt == "json":
+        body, name = json.dumps(proj, ensure_ascii=False, indent=1), f"{pid}.json"
+    else:
+        raise HTTPException(400, "unknown format")
+    return Response(body, media_type="text/plain; charset=utf-8",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{name}"})
+
+
+def _source_voice(proj: Dict[str, Any], dst: Path) -> Path:
+    """A voice reference cut from the original recording (its vocals stem when the
+    recognition separated one): the longest stretch of continuous speech, 5-15 s."""
+    from subalign.audio.io import load_audio, save_audio
+
+    src = proj["source"]
+    media = src.get("vocals_path") or src.get("media_path")
+    if not media or not Path(media).exists():
+        raise HTTPException(400, "没有原始音频，无法使用原声音色")
+    ss = [s for s in proj["sentences"] if s.get("start") is not None and s.get("end") is not None]
+    best, best_len = None, 0.0
+    for i in range(len(ss)):                         # contiguous runs of sentences, at most 15 s
+        a, b = ss[i]["start"], ss[i]["end"]
+        for j in range(i + 1, len(ss)):
+            if ss[j]["start"] - b > 0.8 or ss[j]["end"] - a > 15:
+                break
+            b = ss[j]["end"]
+        if b - a > best_len:
+            best, best_len = (a, b), b - a
+        if best_len >= 12:
+            break
+    a, b = best or (0.0, 12.0)
+    y = load_audio(media, 24000)
+    seg = y[int(max(0.0, a - 0.05) * 24000):int(min(b + 0.15, a + 15) * 24000)]
+    if len(seg) < 24000 * 2:
+        raise HTTPException(400, "原音频里找不到足够长的连续人声")
+    dst.mkdir(parents=True, exist_ok=True)
+    out = dst / "source_voice.wav"
+    save_audio(out, seg, 24000)
+    return out
+
+
+@app.post("/api/dubtrans/projects/{pid}/to-dubbing")
+async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[UploadFile] = File(None),
+                        spk_recording: str = Form(""), emo: Optional[UploadFile] = File(None), emo_recording: str = Form(""),
+                        config: str = Form("{}"), title: str = Form(""), timeline: bool = Form(True), start: bool = Form(True)):
+    """The translation -> an AI voice-over project (one sentence each, original timing kept)."""
+    from subalign.tts import dubbing
+
+    proj = _dt_get(pid)
+    if _dt_state.get(pid, {}).get("busy"):
+        raise HTTPException(409, "还在翻译，请等翻译完成")
+    sents = [{"text": s.get("translation") or "", "start": s.get("start"), "end": s.get("end"), "source_text": s["text"]}
+             for s in proj["sentences"] if (s.get("translation") or "").strip()]
+    if not sents:
+        raise HTTPException(400, "还没有译文")
+    try:
+        cd = json.loads(config)
+    except json.JSONDecodeError as e:
+        raise HTTPException(400, f"config: {e}")
+    did = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+    ddir = DUB_DIR / did
+    try:
+        spk_p = await _ref_audio(ddir / "ref", spk, spk_recording)
+        if spk_p is None:
+            if not use_source:
+                raise HTTPException(400, "请上传或选择音色参考 A")
+            spk_p = _source_voice(proj, ddir / "ref")
+        emo_p = await _ref_audio(ddir / "ref", emo, emo_recording)
+        spk_p, emo_p = _trim_reference(spk_p), _trim_reference(emo_p) if emo_p else None
+    except BaseException:
+        shutil.rmtree(ddir, ignore_errors=True)         # no half-made project in the list
+        raise
+    tgt = proj["config"].get("target", "en").lower()
+    cd.update(lang=TTS_LANG.get(tgt, tgt.split("-")[0].upper()),
+              timeline=bool(timeline and all(s["start"] is not None for s in sents)))
+    cfg = dubbing.DubConfig(**{k: v for k, v in cd.items() if k in dubbing.DubConfig.__dataclass_fields__})
+    dp = dubbing.create_project(ddir, "", spk_p, emo_p, cfg, title or proj.get("title", ""), sentences=sents,
+                                source={"dubtrans": pid, "media_url": _dt_view(pid).get("media_url")})
+    with _dt_lock:
+        p2 = _dt_get(pid)
+        p2.setdefault("dubbing", []).append(did)
+        _dt_save(pid, p2)
+    if start:
+        ollama.unload_all()                         # the translation model would crowd out IndexTTS
+        _tts_enqueue(did, [s["id"] for s in dp["segments"]])
+    return {"id": did}
 
 
 # ------------------------------------------------------------------ info / status

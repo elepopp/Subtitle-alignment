@@ -232,6 +232,33 @@ details.sec[open]>summary.sec-title{margin-bottom:12px}
 .dub-row input.tt{font:12px var(--mono);padding:6px 7px}
 .dub-row .qa{font-size:11.5px;color:var(--muted);padding:3px 2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dub-row .ops{display:flex;gap:4px;align-items:center;flex-wrap:wrap}
+.dub-row .src{font-size:11.5px;color:var(--faint);padding:2px 2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* ---------- audio translation */
+.dt-list{display:flex;flex-direction:column;gap:10px}
+.dt-row{border:1px solid var(--line);border-radius:var(--r);padding:10px 12px;background:var(--surface)}
+.dt-row.bad{border-left:3px solid var(--warn)}
+.dt-row.err{border-left:3px solid var(--err)}
+.dt-head{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-bottom:4px;flex-wrap:wrap}
+.dt-head .idx{font:12px var(--mono);color:var(--faint)}
+.dt-head .sp{flex:1}
+.dt-src{font-size:14.5px;line-height:1.75;color:var(--text-2)}
+.dt-src mark{background:var(--accent-weak);color:var(--accent);border-radius:4px;padding:0 2px}
+.dt-meta{display:flex;gap:6px 10px;flex-wrap:wrap;align-items:center;font-size:11.5px;color:var(--muted);margin-top:3px}
+.dt-meta .ok{color:var(--ok)}.dt-meta .bad{color:var(--err)}.dt-meta .warn{color:var(--warn)}
+.dt-bar{position:relative;height:30px;margin:7px 0 4px;border-radius:6px;background:var(--surface-3)}
+.dt-bar .half{position:absolute;left:50%;top:3px;bottom:3px;border-left:1px dashed var(--line-strong)}
+.dt-bar .pin{position:absolute;transform:translateX(-50%);font-size:10.5px;white-space:nowrap;padding:0 4px;border-radius:4px;line-height:13px;max-width:30%;overflow:hidden;text-overflow:ellipsis}
+.dt-bar .pin.s{top:1px;background:var(--accent-weak);color:var(--accent)}
+.dt-bar .pin.t{bottom:1px;background:var(--ok-weak);color:var(--ok)}
+.dt-bar .pin.t.bad{background:var(--err-weak);color:var(--err)}
+.dt-tr{margin-top:6px}
+.dt-tr textarea{width:100%;min-height:46px;font:15px/1.6 var(--font);resize:vertical}
+.dt-ops{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px}
+.dt-ops input{width:auto;flex:1;min-width:140px;font-size:12.5px;padding:5px 9px}
+.dt-cand{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:6px 8px;border-radius:8px;font-size:13.5px}
+.dt-cand:hover{background:var(--surface-2)}
+.dt-cand.on{background:var(--accent-weak)}
+.dt-cand .m{font-size:11px;color:var(--muted);margin-top:2px}
 .note{background:var(--warn-weak);border:1px solid color-mix(in srgb,var(--warn) 30%,transparent);color:var(--text-2);border-radius:var(--r);padding:9px 13px;font-size:13px;margin-bottom:12px}
 .md{font-size:13px}
 .md h3{font-size:14px;margin:4px 0 8px}
@@ -619,13 +646,14 @@ const PAGES = {
   roughcut: { nav: "语音粗剪", icon: "scissors" }, studio: { nav: "音频处理", icon: "sliders" },
   recorder: { nav: "录音棚", icon: "record", render: m => renderRecorder(m) },
   dubbing: { nav: "AI 配音", icon: "voice", render: m => renderDubbing(m) },
+  dubtrans: { nav: "音频翻译", icon: "translate", render: m => renderDubTrans(m) },
   convert: { nav: "格式转换", icon: "convert" }, translate: { nav: "字幕翻译", icon: "translate" }, proofread: { nav: "字幕校对", icon: "check" },
   formats: { nav: "格式与样式", icon: "book", render: renderFormats },
   jobs: { nav: "任务记录", icon: "history", render: renderJobs },
   tests: { nav: "单元测试", icon: "flask", render: renderTests },
 };
 for (const k of Object.keys(TASKS)) PAGES[k].render = () => renderTask(k);
-const NAV = [["", ["status"]], ["对齐", ["align", "lyrics", "separate"]], ["录音与剪辑", ["recorder", "dubbing", "studio", "roughcut"]], ["字幕工具", ["convert", "translate", "proofread"]], ["系统", ["formats", "jobs", "tests"]]];
+const NAV = [["", ["status"]], ["对齐", ["align", "lyrics", "separate"]], ["录音与剪辑", ["recorder", "dubtrans", "dubbing", "studio", "roughcut"]], ["字幕工具", ["convert", "translate", "proofread"]], ["系统", ["formats", "jobs", "tests"]]];
 let current = location.hash.slice(1) || store.get("page", "status");
 
 function renderNav() {
@@ -2030,7 +2058,7 @@ function refPicker(title, hint) {
 
 async function renderDubSetup(m) {
   const st = Object.assign({ speed: 1.0, emo_alpha: 0.8, qa: true, max_tries: 3, breaths: true, room_tone_db: -66, pause_jitter: 0.1,
-    rate_tolerance: 0.06, deharsh_db: 2, air: 0.4, warmth: 0.25, emphasis_db: 3 }, store.get("dub.cfg", {}));
+    rate_tolerance: 0.06, deharsh_db: 2, air: 0.4, warmth: 0.25, emphasis_db: 3, lang: "ZH" }, store.get("dub.cfg", {}));
   const saveSt = () => store.set("dub.cfg", st);
   m.append(pageHead("AI 配音", "文稿预处理 → 音色 A + 情绪 B 逐句生成 → 逐句试听 / 修改 / 重新生成 → 去机械感合成 → 送去音频处理加 BGM、导出。", "IndexTTS-2.5"));
   const status = await fetch("/api/tts/status").then(r => r.json()).catch(() => ({}));
@@ -2055,7 +2083,7 @@ async function renderDubSetup(m) {
   const prep = async () => {
     if (!ta.value.trim()) return alert("请先输入文稿");
     try {
-      const r = await api("/api/tts/prepare", { text: ta.value });
+      const r = await api("/api/tts/prepare", { text: ta.value, lang: st.lang.toLowerCase() });
       if (r.text !== ta.value) raw = ta.value;
       ta.value = r.text; store.set("dub.script", ta.value);
       showPrep(r);
@@ -2097,6 +2125,9 @@ async function renderDubSetup(m) {
     h("div", { class: "toolbar" },
       h("button", { class: "btn primary small", type: "button", onclick: prep, title: "删除括号备注 / 表情 / 链接，数字和符号转读法，统一标点，分句并列出多音字" }, ico("sparkles"), "一键预处理"),
       tool("撤销预处理", "恢复预处理前的原文", () => { if (raw != null) { ta.value = raw; raw = null; store.set("dub.script", ta.value); items = []; prepBox.innerHTML = ""; info.textContent = ""; } }),
+      h("select", { style: "width:auto;font-size:12.5px;padding:4px 26px 4px 8px", title: "文稿语言（配音语言）", onchange: e => { st.lang = e.target.value; saveSt(); } },
+        [["ZH", "中文"], ["EN", "English"], ["JA", "日本語"], ["ES", "Español"]].map(([v, l]) => h("option", { value: v, selected: st.lang === v }, l))),
+      tool("翻译后配音", "上传字幕 / 文稿，翻译成其他语言（音节数和名词位置贴合原文）再配音", () => { sessionStorage.setItem("dt.text", ta.value); go("dubtrans"); }, "translate"),
       h("span", { class: "sp" }),
       tool("停顿", "在光标处插入停顿 <停|秒>", () => insert(() => { const s = prompt("停顿多少秒？", "0.5"); return s && !isNaN(+s) ? `<停|${+s}>` : null; })),
       tool("重读", "选中词语后点击：<重|词>", () => insert(sel => sel ? `<重|${sel}>` : (alert("先选中要重读的词"), null))),
@@ -2197,6 +2228,8 @@ async function renderDubProject(m, pid) {
   const st = { ...P.config };
   const onset = async (k, v) => { try { await api(base + "/config", { [k]: v }); } catch (e) { alert(e.message); } };
   const { voice, natural } = dubParams(st, onset);
+  if (P.segments.some(x => x.src_start != null))
+    natural.prepend(dubCheck(st, "timeline", "对齐原视频时间轴（翻译配音）", async (k, v) => { await onset(k, v); act(base + "/assemble"); }));
   m.append(h("div", { class: "card" }, h("h3", {}, ico("settings"), "声音与参数",
       h("span", { class: "muted", style: "font-weight:400;font-size:12px" }, "生成参数对之后生成的句子生效；去机械感参数点「重新合成总音频」生效")),
     h("div", { class: "split" },
@@ -2242,7 +2275,7 @@ async function renderDubProject(m, pid) {
       player.pause(); mixEl.currentTime = t.start; mixEl.play();
     });
     const el = h("div", { class: "dub-row" }, h("span", { class: "idx" }, s.id), badge,
-      h("div", { style: "min-width:0" }, tx, qa), pause,
+      h("div", { style: "min-width:0" }, tx, qa, s.source_text ? h("div", { class: "src", title: s.source_text }, "原文：" + s.source_text) : null), pause,
       h("div", { class: "ops" }, playB, locB, regenB, takes));
     const r = { el, badge, tx, pause, qa, takes, playB, locB, regenB, seg: s, sig: "" };
     rows.set(s.id, r);
@@ -2250,7 +2283,7 @@ async function renderDubProject(m, pid) {
   }
   function fill(r, s) {
     r.seg = s;
-    const sig = JSON.stringify([s.status, s.audio, s.text, s.pause_after, s.qa, (s.takes || []).length, s.error]);
+    const sig = JSON.stringify([s.status, s.audio, s.text, s.pause_after, s.qa, (s.takes || []).length, s.error, (P.mix?.timing || []).find(x => x.id === s.id)]);
     if (sig === r.sig) return;
     r.sig = sig;
     const [lab, cls] = DUB_STATUS[s.status] || [s.status, ""];
@@ -2267,6 +2300,9 @@ async function renderDubProject(m, pid) {
       r.qa.append(h("span", { class: e == null ? "muted" : e > (P.config.max_error || 0.12) ? "err" : "ok" },
         e == null ? "未校验" : e === 0 ? "校验通过" : `误读 ${Math.round(e * 100)}%`), "  识别：", s.qa.heard || "");
     }
+    const tm = (P.mix?.timing || []).find(x => x.id === s.id);
+    if (tm && tm.src_start != null && (tm.late > 0.05 || Math.abs(tm.tempo - 1) > 0.01))
+      r.qa.prepend(h("span", { class: tm.late > 0.3 ? "err" : "muted" }, (Math.abs(tm.tempo - 1) > 0.01 ? `语速 ×${tm.tempo} ` : "") + (tm.late > 0.05 ? `比原句晚 ${tm.late}s ` : "") + "· "));
     const tk = s.takes || [];
     r.takes.style.display = tk.length > 1 ? "" : "none";
     r.takes.innerHTML = "";
@@ -2303,6 +2339,294 @@ async function renderDubProject(m, pid) {
   });
   const timer = setInterval(async () => {
     try { P = await api(base, undefined, "GET"); update(); } catch (e) {}
+  }, 1500);
+  window.__pageCleanup = () => { clearInterval(timer); player.pause(); };
+}
+
+// ---------------------------------------------------------------- 音频翻译 (dubbing translation)
+const DT_LANGS = [["zh", "中文"], ["en", "英语"], ["ja", "日语"], ["ko", "韩语"], ["fr", "法语"], ["de", "德语"], ["es", "西班牙语"], ["pt", "葡萄牙语"], ["it", "意大利语"], ["ru", "俄语"], ["vi", "越南语"]];
+const DT_TTS = new Set(["zh", "en", "ja", "es"]);          // languages IndexTTS-2.5 can speak
+const DT_STAGE = { start: "准备中", transcribe: "语音识别中", anchors: "标注名词 / 数字位置", translate: "生成候选译文", judge: "大模型评选最自然的版本", done: "完成" };
+const dtStage = s => s && s.startsWith("refine") ? `第 ${s.slice(6)} 轮修正（长度 / 语序未达标的句子）` : (DT_STAGE[s] || s || "");
+const llmBody = () => ({ provider: LLM.provider, model: LLM.model, base_url: LLM.base_url, api_key: LLM.api_key });
+const pct = x => Math.round(x * 100) + "%";
+
+function renderDubTrans(m) {
+  const pid = store.get("dt.project", null);
+  return pid ? renderDtProject(m, pid) : renderDtSetup(m);
+}
+
+function langSelect(value, onchange) {
+  return h("select", { onchange: e => onchange(e.target.value) }, DT_LANGS.map(([v, l]) => h("option", { value: v, selected: v === value }, `${l} ${v}`)));
+}
+
+async function renderDtSetup(m) {
+  const st = Object.assign({ source: "media", src: "zh", tgt: "en", candidates: 4, rounds: 2, tolerance: 0.1, judge: true, merge: true,
+    asr_model: "large-v3-turbo", instructions: "", glossary: "" }, store.get("dt.cfg", {}));
+  const saveSt = () => store.set("dt.cfg", st);
+  const pre = sessionStorage.getItem("dt.text");            // handed over from the AI 配音 page
+  if (pre != null) { st.source = "text"; sessionStorage.removeItem("dt.text"); }
+  m.append(pageHead("音频翻译", "录音 / 视频 → 语音识别 → 翻译：译文音节数贴合原句时长，名词出现在原句相同的位置（多个候选自动打分、可再修正）→ 用原说话人的音色 AI 配音，对齐原视频时间轴。也可以直接翻译字幕或文稿。", "配音翻译"));
+  const ws = h("div", { class: "workspace", style: "grid-template-columns:minmax(0,1fr) minmax(340px,420px)" });
+  m.append(ws);
+
+  // ---- source
+  const seg = h("div", { class: "seg" });
+  const panes = {};
+  const A = refPicker("上传录音 / 视频", "mp3 / wav / m4a / mp4 / mov … 先语音识别出文稿和每个字的时间");
+  const asrSel = h("select", { onchange: e => { st.asr_model = e.target.value; saveSt(); } },
+    [["large-v3-turbo", "large-v3-turbo（快，推荐）"], ["large-v3", "large-v3（更准，较慢）"], ["", "后端默认"]].map(([v, l]) => h("option", { value: v, selected: v === st.asr_model }, l)));
+  panes.media = h("div", {}, A.el, h("div", { class: "field", style: "margin-top:10px" }, h("label", {}, "识别模型"), asrSel,
+    h("div", { class: "hint" }, "识别用「语音对齐」的流程（faster-whisper + CTC 逐字时间）；完成后自动翻译。")));
+  const jobSel = h("select", {}, h("option", { value: "" }, "—— 选择已完成的语音对齐任务 ——"));
+  panes.job = h("div", {}, h("div", { class: "field" }, h("label", {}, "语音对齐任务"), jobSel,
+    h("div", { class: "hint" }, "直接使用已经识别 / 对齐过的结果（含逐字时间轴），不再重复识别。")));
+  fetch("/api/jobs?limit=200").then(r => r.json()).then(l => l.filter(j => j.task === "align" && j.status === "done").forEach(j =>
+    jobSel.append(h("option", { value: j.id }, `${j.id} · ${(j.meta?.media || "").split("/").pop()}`)))).catch(() => {});
+  const ta = h("textarea", { style: "min-height:260px;font:14.5px/1.8 var(--font)", placeholder: "粘贴字幕（SRT / VTT / LRC …）或文稿；也可以上传文件" });
+  let textName = "script.txt";
+  if (pre != null) ta.value = pre;
+  const nameEl = h("span", { class: "muted", style: "font-size:12px" });
+  const tfi = h("input", { type: "file", accept: ".srt,.vtt,.ass,.ssa,.lrc,.json,.txt,.md,.sbv,.ttml", style: "display:none", onchange: async e => {
+    const f = e.target.files[0]; if (!f) return;
+    ta.value = await f.text(); textName = f.name; nameEl.textContent = f.name;
+    if (/\.(srt|vtt|ass|ssa|lrc|json|sbv|ttml)$/i.test(f.name)) mergeBox.style.display = "";
+  } });
+  const sniff = () => { if (/^\s*\d+\s*\n\s*\d\d:\d\d:\d\d[,.]\d+\s*-->/.test(ta.value) && textName === "script.txt") textName = "pasted.srt"; };
+  const mergeBox = dubCheck(st, "merge", "把被切断的半句字幕合并成整句再翻译", () => saveSt());
+  panes.text = h("div", {}, h("div", { class: "toolbar" }, h("button", { class: "btn small", type: "button", onclick: () => tfi.click() }, ico("upload"), "上传字幕 / 文稿"), nameEl, tfi), ta,
+    h("div", { class: "hint", style: "margin-top:6px" }, "字幕保留原时间轴（配音会对齐到原时间）；纯文本按句翻译，时长按语速估算。"), mergeBox);
+  const show = k => { st.source = k; saveSt(); seg.querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.k === k)); for (const [kk, el] of Object.entries(panes)) el.style.display = kk === k ? "" : "none"; };
+  [["media", "upload", "录音 / 视频（自动识别）"], ["job", "history", "已有对齐结果"], ["text", "file", "字幕 / 文稿"]].forEach(([k, i, l]) =>
+    seg.append(h("button", { "data-k": k, type: "button", onclick: () => show(k) }, ico(i), l)));
+  const srcCard = h("div", { class: "card" }, h("h3", {}, ico("file"), "1 · 原始内容"), seg, panes.media, panes.job, panes.text);
+  show(st.source);
+
+  // ---- settings
+  const srcSel = langSelect(st.src, v => { st.src = v; saveSt(); ttsNote(); });
+  const tgtSel = langSelect(st.tgt, v => { st.tgt = v; saveSt(); ttsNote(); });
+  const note = h("div", { class: "hint" });
+  const ttsNote = () => { note.textContent = DT_TTS.has(st.tgt) ? "" : "注意：IndexTTS-2.5 只能用中 / 英 / 日 / 西语配音，这个语言只能翻译和导出字幕。"; note.style.color = "var(--warn)"; };
+  ttsNote();
+  const num = (key, label, opts, hint) => dubSelect(st, key, label, opts, () => saveSt(), hint);
+  const instr = h("input", { type: "text", value: st.instructions, placeholder: "例：口语化、面向年轻观众、保留品牌名原文", oninput: e => { st.instructions = e.target.value; saveSt(); } });
+  const gloss = h("textarea", { style: "min-height:70px;font-size:13px", placeholder: "每行一个：原文=译文\n张三=Zhang San\n小红书=RedNote", oninput: e => { st.glossary = e.target.value; saveSt(); } });
+  gloss.value = st.glossary;
+  const title = h("input", { type: "text", placeholder: "例如：第 3 期口播 英文版" });
+  const msg = h("span", { class: "hint" });
+  const startBtn = h("button", { class: "btn primary block", type: "button" }, ico("translate"), "开始识别 / 翻译");
+  startBtn.addEventListener("click", async () => {
+    if (st.src === st.tgt) return alert("源语言和目标语言相同");
+    const fd = new FormData();
+    fd.append("source", st.source);
+    if (st.source === "media") { const a = A.get(); if (!a.file && !a.rec) return alert("请上传录音 / 视频，或选择录音棚里的录音"); if (a.file) fd.append("media", a.file); else fd.append("recording", a.rec); fd.append("asr_model", st.asr_model); }
+    else if (st.source === "job") { if (!jobSel.value) return alert("请选择一个语音对齐任务"); fd.append("job", jobSel.value); }
+    else { if (!ta.value.trim()) return alert("请粘贴或上传字幕 / 文稿"); sniff(); fd.append("text_content", ta.value); fd.append("text_name", textName); }
+    const glossary = Object.fromEntries(st.glossary.split("\n").map(l => l.split(/[=＝]/)).filter(p => p.length >= 2 && p[0].trim() && p[1].trim()).map(p => [p[0].trim(), p.slice(1).join("=").trim()]));
+    fd.append("src_lang", st.src); fd.append("tgt_lang", st.tgt); fd.append("merge", st.merge ? "true" : "false");
+    fd.append("config", JSON.stringify({ candidates: +st.candidates, rounds: +st.rounds, tolerance: +st.tolerance, judge: !!st.judge, instructions: st.instructions, glossary }));
+    fd.append("llm", JSON.stringify(llmBody())); fd.append("title", title.value.trim());
+    startBtn.disabled = true; msg.textContent = "上传中…";
+    try { const d = await api("/api/dubtrans/projects", fd); store.set("dt.project", d.id); go("dubtrans"); }
+    catch (e) { msg.textContent = ""; alert(e.message); startBtn.disabled = false; }
+  });
+  const panel = h("div", { class: "panel" },
+    h("div", { class: "panel-head" }, ico("settings"), "2 · 翻译设置"),
+    h("div", { class: "panel-body" },
+      sec("语言", h("div", {}, h("div", { class: "grid" }, h("div", { class: "field" }, h("label", {}, "原文"), srcSel), h("div", { class: "field" }, h("label", {}, "译文"), tgtSel)), note), { n: 1 }),
+      sec("长度与语序", h("div", { class: "grid" },
+        num("tolerance", "音节数允许偏差", [[0.05, "±5%（严格）"], [0.1, "±10%（推荐）"], [0.15, "±15%"], [0.2, "±20%（宽松）"]], "按两种语言的平均语速换算目标音节数"),
+        num("candidates", "每句候选数", [[3, "3 个"], [4, "4 个（推荐）"], [5, "5 个"], [6, "6 个"]], "结构不同的多种写法，逐个计数打分"),
+        num("rounds", "未达标时再修正", [[0, "不修正"], [1, "1 轮"], [2, "2 轮（推荐）"], [3, "3 轮"]], "把超长 / 名词位置偏了的问题反馈给大模型重写"),
+        dubCheck(st, "judge", "大模型从最优的几个里挑最自然的", () => saveSt())), { n: 2 }),
+      sec("要求与术语", h("div", {}, h("div", { class: "field" }, h("label", {}, "额外要求"), instr), h("div", { class: "field", style: "margin-top:8px" }, h("label", {}, "术语表"), gloss)), { collapsible: true, open: false }),
+      sec("项目", h("div", { class: "field" }, h("label", {}, "名称"), title, h("div", { class: "hint" }, `大模型：${LLM.provider}${LLM.model ? " · " + LLM.model : ""}（在「状态总览」修改）`)))),
+    h("div", { class: "panel-foot" }, startBtn, msg));
+  const left = h("div", {}, srcCard);
+  ws.append(left, panel);
+
+  const list = await fetch("/api/dubtrans/projects").then(r => r.json()).catch(() => []);
+  if (list.length) left.append(h("div", { class: "card" }, h("h3", {}, ico("history"), "最近的翻译项目"),
+    h("div", { class: "tbl" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "名称"), h("th", {}, "语言"), h("th", {}, "创建"), h("th", {}, "进度"), h("th", {}, ""))),
+      h("tbody", {}, list.slice(0, 20).map(p => h("tr", { class: "click", onclick: () => { store.set("dt.project", p.id); go("dubtrans"); } },
+        h("td", {}, p.title), h("td", { class: "muted" }, `${p.src} → ${p.tgt}`), h("td", { class: "muted" }, new Date(p.created * 1000).toLocaleString()),
+        h("td", {}, `${p.done} / ${p.n} 句`, p.n ? h("span", { class: "badge " + (p.ok === p.n ? "ok" : "warn"), style: "margin-left:6px" }, `${p.ok} 句达标`) : null),
+        h("td", { style: "text-align:right" }, h("span", { class: "btn small" }, "打开")))))))));
+}
+
+// a source text with its anchors highlighted
+function anchoredText(text, anchors) {
+  const el = h("div", { class: "dt-src" });
+  let at = 0;
+  for (const a of [...(anchors || [])].sort((x, y) => x.offset - y.offset)) {
+    if (a.offset < at) continue;
+    el.append(text.slice(at, a.offset), h("mark", { title: `${pct(a.pos)}${a.time != null ? " · 第 " + a.time + " 秒" : ""}` }, text.slice(a.offset, a.offset + a.text.length)));
+    at = a.offset + a.text.length;
+  }
+  el.append(text.slice(at));
+  return el;
+}
+
+function candMeta(s, c) {
+  const t = s.target || {};
+  const out = h("div", { class: "dt-meta" });
+  const dev = c.len_dev || 0;
+  out.append(h("span", { class: Math.abs(dev) <= (t.hi - t.syllables) / t.syllables + 1e-6 ? "ok" : "bad" },
+    `${c.syllables} 音节（${dev >= 0 ? "+" : ""}${Math.round(dev * 100)}%）`), h("span", {}, `${c.phonemes} 音素`));
+  for (const a of c.anchors || []) {
+    out.append(h("span", { class: a.missing ? "bad" : a.ok ? "ok" : a.cross ? "bad" : "warn", title: a.missing ? "译文里没找到这个词" : `原文 ${pct(a.src_pos)} → 译文 ${pct(a.tgt_pos)}` },
+      a.missing ? `${a.src} → ？` : `${a.src}→${a.tgt} ${pct(a.src_pos)}→${pct(a.tgt_pos)}${a.ok ? " ✓" : a.cross ? " ✗ 跨半句" : " ~"}`));
+  }
+  if (c.judge != null) out.append(h("span", { title: "大模型评分：忠实 + 自然" }, `自然度 ${c.judge}/10`));
+  if (c.custom) out.append(h("span", {}, "手动修改"));
+  return out;
+}
+
+function anchorBar(s, c) {
+  const bar = h("div", { class: "dt-bar", title: "上：原文名词出现的位置　下：译文中的位置　虚线：半句" }, h("div", { class: "half" }));
+  for (const a of s.anchors || []) bar.append(h("span", { class: "pin s", style: `left:${Math.min(96, Math.max(4, a.pos * 100))}%` }, a.text));
+  for (const a of (c && c.anchors) || []) if (!a.missing) bar.append(h("span", { class: "pin t" + (a.ok ? "" : " bad"), style: `left:${Math.min(96, Math.max(4, a.tgt_pos * 100))}%` }, a.tgt || a.src));
+  return bar;
+}
+
+async function renderDtProject(m, pid) {
+  let P;
+  try { P = await api("/api/dubtrans/projects/" + pid, undefined, "GET"); }
+  catch { store.set("dt.project", null); return go("dubtrans"); }
+  const base = "/api/dubtrans/projects/" + pid;
+  const C = P.config;
+  m.append(pageHead(P.title || "音频翻译", `${C.source} → ${C.target} · 每句 ${C.candidates} 个候选 · 音节偏差 ±${Math.round(C.tolerance * 100)}% · 名词留在原来的半句`, "音频翻译",
+    h("div", { class: "row" }, h("button", { class: "btn", onclick: () => { store.set("dt.project", null); go("dubtrans"); } }, ico("edit"), "新建 / 项目列表"))));
+  const act = async (url, body) => { try { P = await api(url, body); update(true); } catch (e) { alert(e.message); } };
+  const player = new Audio();
+  let stopAt = null;
+  player.addEventListener("timeupdate", () => { if (stopAt != null && player.currentTime >= stopAt) { player.pause(); stopAt = null; } });
+
+  // ---- status / actions
+  const prog = h("span", { class: "badge" }), stage = h("span", { class: "muted", style: "font-size:12.5px" });
+  const errEl = h("div");
+  const tolSel = h("select", { style: "width:auto", onchange: e => act(base + "/config", { tolerance: +e.target.value }) },
+    [[0.05, "±5%"], [0.1, "±10%"], [0.15, "±15%"], [0.2, "±20%"]].map(([v, l]) => h("option", { value: v, selected: Math.abs(v - C.tolerance) < 1e-6 }, "音节偏差 " + l)));
+  const media = P.media_url ? h("audio", { controls: true, src: P.media_url, style: "margin-top:8px" }) : null;
+  const statusCard = h("div", { class: "card" },
+    h("h3", {}, ico("translate"), "翻译", prog, stage), errEl, media,
+    h("div", { class: "row", style: "margin-top:10px" },
+      h("button", { class: "btn", type: "button", title: "只给没达标（长度或名词位置）的句子再生成候选", onclick: () => {
+        const ids = P.sentences.filter(s => !dtOk(s)).map(s => s.id);
+        if (!ids.length) return alert("所有句子都已达标");
+        act(base + "/retranslate", { ids, llm: llmBody() });
+      } }, ico("sparkles"), "修正未达标的句子"),
+      h("button", { class: "btn", type: "button", onclick: () => { if (confirm("丢弃全部候选，重新翻译？")) act(base + "/retranslate", { reset: true, llm: llmBody() }); } }, ico("history"), "全部重新翻译"),
+      tolSel,
+      h("span", { class: "sp", style: "flex:1" }),
+      h("a", { class: "btn small", href: base + "/export?fmt=srt" }, ico("download"), "译文 SRT"),
+      h("a", { class: "btn small", href: base + "/export?fmt=srt2" }, ico("download"), "双语 SRT"),
+      h("a", { class: "btn small", href: base + "/export?fmt=txt" }, ico("download"), "译文 TXT")));
+  m.append(statusCard);
+
+  // ---- sentences
+  const listEl = h("div", { class: "dt-list" });
+  m.append(h("div", { class: "card" }, h("h3", {}, ico("timeline"), "逐句", h("span", { class: "muted", style: "font-weight:400;font-size:12px" },
+    "高亮 = 名词 / 数字（锚点）· 位置条：上为原文出现位置，下为译文位置 · 可改译文、选其他候选，或写提示后重新生成")), listEl));
+  const rows = new Map();
+  function dtOk(s) { const c = (s.candidates || [])[s.choice]; return !!(c && c.ok); }
+  function buildRow(s) {
+    const el = h("div", { class: "dt-row" });
+    const r = { el, sig: "", dirty: false };
+    rows.set(s.id, r);
+    return r;
+  }
+  function fillRow(r, s) {
+    const sig = JSON.stringify([s.translation, s.choice, s.locked, (s.candidates || []).length, s.target, s.anchors, s.error, P.busy && P.stage, (s.candidates || []).map(c => c.judge)]);
+    const ae = document.activeElement;
+    if (sig === r.sig || r.dirty || (r.el.contains(ae) && /^(TEXTAREA|INPUT)$/.test(ae.tagName) && ae.value)) return;
+    r.sig = sig;
+    const el = r.el;
+    el.innerHTML = "";
+    const cands = s.candidates || [], c = cands[s.choice];
+    el.classList.toggle("bad", !!c && !c.ok);
+    el.classList.toggle("err", !!s.error && !c);
+    const badge = !c ? h("span", { class: "badge " + (s.error ? "err" : P.busy ? "run" : "") }, s.error ? "失败" : P.busy ? "翻译中" : "无译文")
+      : c.ok ? h("span", { class: "badge ok" }, "达标") : h("span", { class: "badge warn" }, Math.abs(c.len_dev) > C.tolerance ? `长度 ${c.len_dev > 0 ? "+" : ""}${Math.round(c.len_dev * 100)}%` : "语序偏差");
+    const time = s.start != null ? `${fmtT(s.start).slice(0, 8)} – ${fmtT(s.end).slice(0, 8)} · ${s.duration}s` : `约 ${s.duration ?? "?"}s（估算）`;
+    const playB = P.media_url && s.start != null ? h("button", { class: "icon", type: "button", title: "播放原声这一句", onclick: () => {
+      player.src !== location.origin + P.media_url && (player.src = P.media_url);
+      player.currentTime = Math.max(0, s.start - 0.05); stopAt = s.end + 0.1; player.play();
+    } }, ico("play")) : null;
+    const t = s.target;
+    el.append(h("div", { class: "dt-head" }, h("span", { class: "idx" }, "#" + s.id), badge, h("span", {}, time), playB, h("span", { class: "sp" }),
+      t ? h("span", { title: t.by === "time" ? "原句语速较快：按时长和配音的正常语速限制，避免配音超出原句时长" : "按两种语言的平均语速换算" },
+        `原文 ${s.syllables} 音节 · ${s.phonemes} 音素 → 目标 ${t.syllables} 音节（${t.lo}–${t.hi}${t.by === "time" ? "，按时长" : ""}）`) : null));
+    el.append(anchoredText(s.text, s.anchors));
+    if (s.anchors && s.anchors.length) el.append(anchorBar(s, c));
+    if (s.error && !c) el.append(h("div", { class: "hint", style: "color:var(--err)" }, s.error));
+    const ta = h("textarea", {}); ta.value = s.translation || "";
+    const saveB = h("button", { class: "btn small primary", type: "button", style: "display:none", onclick: () => { r.dirty = false; act(`${base}/sentences/${s.id}`, { text: ta.value }); } }, "保存修改（重新计数）");
+    ta.addEventListener("input", () => { r.dirty = ta.value !== (s.translation || ""); saveB.style.display = r.dirty ? "" : "none"; });
+    const hint = h("input", { type: "text", placeholder: "给这一句的提示（可选）：更短 / 更口语 / 把 Apple 放前面…" });
+    const regen = h("button", { class: "btn small", type: "button", disabled: P.busy, onclick: () => { r.dirty = false; act(`${base}/sentences/${s.id}`, { regenerate: true, hint: hint.value, llm: llmBody() }); } }, ico("sparkles"), "再生成候选");
+    el.append(h("div", { class: "dt-tr" }, ta, c ? candMeta(s, c) : null,
+      h("div", { class: "dt-ops" }, saveB, hint, regen, s.locked ? h("button", { class: "btn small", type: "button", title: "按分数自动选择", onclick: () => act(`${base}/sentences/${s.id}`, { auto: true }) }, "自动选择") : null)));
+    if (cands.length > 1) {
+      const order = cands.map((x, i) => i).sort((a, b) => (cands[a].final ?? cands[a].cost) - (cands[b].final ?? cands[b].cost));
+      el.append(h("details", { class: "sec", style: "margin-top:6px" }, h("summary", { class: "sec-title", style: "font-size:12.5px" }, `全部候选（${cands.length}）`, h("span", { class: "sp" }), ico("chev", "chev")),
+        h("div", {}, order.map(i => { const x = cands[i]; return h("div", { class: "dt-cand" + (i === s.choice ? " on" : "") },
+          h("div", { style: "min-width:0" }, h("div", {}, x.text), candMeta(s, x)),
+          h("button", { class: "btn small", type: "button", disabled: i === s.choice, onclick: () => act(`${base}/sentences/${s.id}`, { choice: i }) }, i === s.choice ? "当前" : "选用")); }))));
+    }
+  }
+  function update(force) {
+    if (force) rows.forEach(r => { r.sig = ""; });
+    for (const s of P.sentences) {
+      const r = rows.get(s.id) || buildRow(s);
+      if (!r.el.parentNode) listEl.append(r.el);
+      fillRow(r, s);
+    }
+    const n = P.sentences.length, done = P.sentences.filter(s => s.translation).length, ok = P.sentences.filter(dtOk).length;
+    prog.className = "badge " + (P.busy ? "run" : P.error ? "err" : ok === n && n ? "ok" : "warn");
+    prog.textContent = P.busy ? (P.stage === "transcribe" ? "识别中" : `${done} / ${n} 句`) : n ? `${ok} / ${n} 句达标` : "无句子";
+    stage.textContent = P.busy ? dtStage(P.stage) + (P.total ? ` · ${P.done} / ${P.total}` : "") + (P.job_log && P.job_log.length ? " · " + P.job_log[P.job_log.length - 1].slice(0, 80) : "") : "";
+    errEl.innerHTML = "";
+    if (P.error) errEl.append(h("div", { class: "note" }, "出错：" + P.error));
+    dubBtn.disabled = P.busy || !done;
+  }
+
+  // ---- to AI voice-over
+  const dst = Object.assign({ speed: 1.0, emo_alpha: 0.8, qa: true, max_tries: 3, breaths: true, room_tone_db: -66, pause_jitter: 0.1,
+    rate_tolerance: 0.06, deharsh_db: 2, air: 0.4, warmth: 0.25, emphasis_db: 3 }, store.get("dub.cfg", {}));
+  const timed = P.sentences.some(s => s.start != null);
+  const useSrc = { v: !!P.has_voice }, tl = { v: timed };
+  const A = refPicker("音色参考 A" + (P.has_voice ? "（可选）" : "（必填）"), P.has_voice ? "不选则直接用原音频里的说话人声音" : "要克隆的声音：5-15 秒干净人声");
+  const B = refPicker("情绪参考 B（可选）", "想模仿的语气 / 情绪");
+  const { voice } = dubParams(dst, () => store.set("dub.cfg", dst));
+  const dubMsg = h("span", { class: "hint" });
+  const dubBtn = h("button", { class: "btn primary", type: "button" }, ico("voice"), "生成 AI 配音");
+  dubBtn.addEventListener("click", async () => {
+    const a = A.get(), b = B.get();
+    if (!a.file && !a.rec && !(useSrc.v && P.has_voice)) return alert("请上传或选择音色参考 A");
+    if (!DT_TTS.has(C.target.split("-")[0]) && !confirm("IndexTTS-2.5 不支持这个语言，仍然尝试？")) return;
+    const fd = new FormData();
+    fd.append("use_source", useSrc.v ? "true" : "false"); fd.append("timeline", tl.v ? "true" : "false");
+    if (a.file) fd.append("spk", a.file); else if (a.rec) fd.append("spk_recording", a.rec);
+    if (b.file) fd.append("emo", b.file); else if (b.rec) fd.append("emo_recording", b.rec);
+    fd.append("config", JSON.stringify(dst)); fd.append("title", (P.title || "音频翻译") + ` · ${C.target}`);
+    dubBtn.disabled = true; dubMsg.textContent = "创建配音项目…";
+    try { const d = await api(base + "/to-dubbing", fd); store.set("dub.project", d.id); go("dubbing"); }
+    catch (e) { dubMsg.textContent = ""; alert(e.message); dubBtn.disabled = false; }
+  });
+  const chk = (o, label, disabled) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: o.v, disabled, onchange: e => { o.v = e.target.checked; } }), label);
+  m.append(h("div", { class: "card" }, h("h3", {}, ico("voice"), "AI 配音", h("span", { class: "muted", style: "font-weight:400;font-size:12px" }, "译文逐句生成（IndexTTS-2.5），之后可在「AI 配音」里逐句试听、修改、重新生成")),
+    h("div", { class: "row", style: "gap:18px;margin-bottom:10px" },
+      P.has_voice ? chk(useSrc, "用原音频里的声音（克隆原说话人）") : null,
+      chk(tl, timed ? "对齐原视频时间轴（每句从原句开始处说，超时自动微调语速）" : "对齐原时间轴（这份文稿没有时间轴）", !timed)),
+    h("div", { class: "split" }, A.el, B.el),
+    h("details", { class: "sec", style: "margin-top:10px" }, h("summary", { class: "sec-title" }, "生成参数", h("span", { class: "sp" }), ico("chev", "chev")), voice),
+    (P.dubbing || []).length ? h("div", { class: "hint", style: "margin-top:8px" }, "已创建的配音：", P.dubbing.map(id => h("a", { href: "#", style: "margin-left:8px", onclick: e => { e.preventDefault(); store.set("dub.project", id); go("dubbing"); } }, id))) : null,
+    h("div", { class: "row", style: "margin-top:12px" }, dubBtn, dubMsg)));
+
+  update();
+  const timer = setInterval(async () => {
+    try { const was = P.busy; P = await api(base, undefined, "GET"); update(was && !P.busy); } catch (e) {}
   }, 1500);
   window.__pageCleanup = () => { clearInterval(timer); player.pause(); };
 }

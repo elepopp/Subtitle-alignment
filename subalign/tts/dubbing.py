@@ -62,6 +62,12 @@ class DubConfig:
     air: float = 0.4                  # exciter amount (0 = off)
     warmth: float = 0.25              # soft saturation (0 = off)
     emphasis_db: float = 3.0
+    # dubbing over a video (from a translation with the original timing): every sentence
+    # starts where the original sentence started; takes that overrun the slot are sped up
+    # (pitch-preserving) by at most ``max_stretch``, short ones slowed by at most ``min_stretch``
+    timeline: bool = False
+    max_stretch: float = 1.15
+    min_stretch: float = 0.93
 
 
 # ------------------------------------------------------------------ engine worker
@@ -136,18 +142,46 @@ def _now() -> float:
     return round(time.time(), 3)
 
 
-def create_project(pdir: Path, script: str, spk: Path, emo: Optional[Path], cfg: DubConfig, title: str = "") -> Dict:
+def create_project(pdir: Path, script: str, spk: Path, emo: Optional[Path], cfg: DubConfig, title: str = "",
+                   sentences: Optional[List[Dict]] = None, source: Optional[Dict] = None) -> Dict:
     """``script``: the text, raw or already reviewed (markup allowed).  It is always
-    normalised (idempotent), so notes / emoji / digits never reach the engine."""
+    normalised (idempotent), so notes / emoji / digits never reach the engine.
+
+    ``sentences`` (from a dubbing translation): ``[{"text", "start", "end"}]`` - one
+    segment each, never re-split, with the original timing kept for timeline assembly."""
     pdir.mkdir(parents=True, exist_ok=True)
-    script = textprep.normalize(script)
-    segs = textprep.split_segments(script)
+    lang = cfg.lang.lower()
+    if sentences is None:
+        script = textprep.normalize(script, lang=lang)
+        segs = [dict(asdict(s)) for s in textprep.split_segments(script, lang=lang)]
+    else:
+        segs = _timed_segments(sentences, lang)
+        script = "\n".join(s["text"] for s in segs)
     proj = {"version": 1, "title": title or "AI 配音", "created": _now(), "spk": str(spk), "emo": str(emo) if emo else None,
-            "script": script, "config": asdict(cfg), "mix": None, "final": None,
-            "segments": [dict(asdict(s), id=i + 1, status="pending", audio=None, takes=[], qa=None)
-                         for i, s in enumerate(segs)]}
+            "script": script, "config": asdict(cfg), "mix": None, "final": None, "source": source,
+            "segments": [dict(s, id=i + 1, status="pending", audio=None, takes=[], qa=None) for i, s in enumerate(segs)]}
     save(pdir, proj)
     return proj
+
+
+def _timed_segments(sentences: List[Dict], lang: str) -> List[Dict]:
+    cjk = textprep.is_cjk_lang(lang)
+    ends = textprep.SENT_END + textprep.CLAUSE if cjk else textprep.LATIN_END + textprep.LATIN_CLAUSE + "…"
+    out = []
+    for i, s in enumerate(sentences):
+        t = textprep.normalize(s.get("text") or "", lang=lang)
+        if not t:
+            continue
+        if t[-1] not in ends:
+            t += "。" if cjk else "."
+        tts, emph = textprep.to_engine(t)
+        nxt = sentences[i + 1].get("start") if i + 1 < len(sentences) else None
+        pause = 0.45
+        if s.get("end") is not None and nxt is not None:
+            pause = round(max(0.1, min(3.0, nxt - s["end"])), 2)
+        out.append({"text": t, "tts_text": tts, "pause_after": pause, "emphasis": emph, "paragraph_end": False,
+                    "src_start": s.get("start"), "src_end": s.get("end"), "source_text": s.get("source_text")})
+    return out
 
 
 def load(pdir: Path) -> Dict:
@@ -189,7 +223,7 @@ def edit_segment(pdir: Path, sid: int, text: Optional[str] = None, pause_after: 
     def fn(proj):
         s = find(proj, sid)
         if text is not None and text.strip():
-            t = textprep.normalize(text.strip())
+            t = textprep.normalize(text.strip(), lang=proj["config"].get("lang", "ZH").lower())
             if t != s["text"]:
                 s["text"] = t
                 s["tts_text"], s["emphasis"] = textprep.to_engine(t)
@@ -215,21 +249,36 @@ def _plain(text: str) -> str:
     return "".join(normalize_key(c) for c in t)
 
 
+def _units(text: str, lang: str) -> List[str]:
+    """What is compared in QA: characters for CJK, words (numbers read out) otherwise."""
+    if textprep.is_cjk_lang(lang):
+        return list(_plain(text))
+    from ..text.tokenize import normalize_key
+    from ..translate.isochrony import number_to_en
+
+    t, _ = textprep.to_engine(text)
+    t = re.sub(r"<([^<>|]+)\|[^<>]+>", r"\1", t)
+    if lang.startswith("en"):
+        t = re.sub(r"[$¥€£]?\d+(?:[.,:]\d+)*%?", lambda m: number_to_en(m.group(0)), t)
+    return [k for k in (normalize_key(w) for w in re.split(r"[\s\-]+", t)) if k]
+
+
 _ASR = {}
 
 
 def check_take(path: Path, text: str, lang: str = "zh") -> Dict:
-    """Transcribe a take and compare with the intended text: character error rate
-    where a homophone (same reading, other character) counts as correct."""
+    """Transcribe a take and compare with the intended text: character (CJK) / word
+    error rate where a homophone (same reading, other character) counts as correct."""
     from ..align.sequence import align_keys
     from ..asr import get_backend
 
     if "asr" not in _ASR:
         _ASR["asr"] = get_backend("faster-whisper", model="large-v3-turbo")
     tr = _ASR["asr"].transcribe(str(path), language=lang, vad=False)
-    heard = "".join(s.text for s in tr.segments)
+    joiner = "" if textprep.is_cjk_lang(lang) else " "
+    heard = joiner.join(s.text.strip() for s in tr.segments)
     # whisper writes numbers as digits: read them out the same way as the script
-    ref, hyp = list(_plain(text)), list(_plain(textprep.normalize(heard)))
+    ref, hyp = _units(text, lang), _units(textprep.normalize(heard, lang=lang), lang)
     if not ref:
         return {"error": 0.0, "heard": heard}
     ops = align_keys(ref, hyp)
@@ -458,10 +507,9 @@ def use_take(pdir: Path, sid: int, file: str) -> Dict:
 
 
 def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
-    """Takes -> one natural-sounding voice track (48 kHz) + per-sentence timing."""
-    from ..audio.io import save_audio
-
-    cfg = DubConfig(**proj["config"])
+    """Takes -> one natural-sounding voice track (48 kHz) + per-sentence timing.  With
+    ``timeline`` (a translated dub) sentences sit at the original times instead."""
+    cfg = DubConfig(**{k: v for k, v in proj["config"].items() if k in DubConfig.__dataclass_fields__})
     rng = np.random.default_rng(int(proj.get("created", 7)) % 2 ** 32)
     segs = [s for s in proj["segments"] if s.get("audio")]
     if not segs:
@@ -476,8 +524,9 @@ def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
     louds = [_loudness(c) for c in clips]
     target = float(np.median([l for l in louds if l > -60] or [-23]))
     clips = [c * 10 ** (max(-6, min(6, target - l)) / 20) if l > -60 else c for c, l in zip(clips, louds)]
-    # speaking-rate evening (pitch-preserving)
-    if cfg.rate_tolerance > 0 and len(clips) > 2:
+    timeline = cfg.timeline and all(s.get("src_start") is not None for s in segs)
+    # speaking-rate evening (pitch-preserving); on a timeline every take is fitted to its slot instead
+    if cfg.rate_tolerance > 0 and len(clips) > 2 and not timeline:
         rates = [speaking_rate(c, s["text"]) for c, s in zip(clips, segs)]
         med = float(np.median(rates))
         for i, (c, rt) in enumerate(zip(clips, rates)):
@@ -495,6 +544,9 @@ def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
         voice = float(np.median([_rms(c[np.abs(c) > 0.02 * np.abs(c).max()]) for c in clips]))
         breaths = [b * (voice * 10 ** (-24 / 20) / _rms(b)) for b in breaths]
     tone_lvl = 10 ** (cfg.room_tone_db / 20) if cfg.room_tone_db < 0 else 0.0
+    if timeline:
+        y, timing = _place_on_timeline(clips, segs, cfg, breaths)
+        return _finish(pdir, proj, y, timing, cfg, tone_lvl, out)
     parts: List[np.ndarray] = [np.zeros(int(0.25 * SR), np.float32)]
     timing = []
     t = len(parts[0])
@@ -513,7 +565,54 @@ def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
         parts.append(c)
         t += len(c)
     parts.append(np.zeros(int(0.4 * SR), np.float32))
-    y = np.concatenate(parts)
+    return _finish(pdir, proj, np.concatenate(parts), timing, cfg, tone_lvl, out)
+
+
+def fit_factor(length: float, slot: float, natural: float, cfg: DubConfig) -> float:
+    """Tempo factor (> 1 = faster) for a take of ``length`` s in a slot of ``slot`` s
+    (until the next sentence) where the original took ``natural`` s."""
+    if length > slot > 0:
+        return min(cfg.max_stretch, length / slot)
+    if natural > 0 and length < natural * 0.85:
+        return max(cfg.min_stretch, length / natural)
+    return 1.0
+
+
+def _place_on_timeline(clips: List[np.ndarray], segs: List[Dict], cfg: DubConfig,
+                       breaths: List[np.ndarray]) -> tuple:
+    """Every sentence starts at its original start time; a take longer than its slot is
+    sped up (at most ``max_stretch``) and, if still too long, pushes the next one later."""
+    gap_min = int(0.08 * SR)
+    placed, timing = [], []
+    cursor = 0
+    for i, (c, s) in enumerate(zip(clips, segs)):
+        start = int(s["src_start"] * SR)
+        nxt = segs[i + 1]["src_start"] if i + 1 < len(segs) else None
+        natural = (s.get("src_end") or s["src_start"]) - s["src_start"]
+        slot = (nxt - s["src_start"] - 0.08) if nxt is not None else natural + 1.0
+        f = fit_factor(len(c) / SR, slot, natural, cfg)
+        if abs(f - 1) >= 0.01:
+            c = stretch(c, f)
+        at = max(start, cursor + (gap_min if placed else 0))
+        if breaths and placed and at - cursor >= int(0.5 * SR):
+            b = breaths[i % len(breaths)]
+            if len(b) < at - cursor - int(0.1 * SR):
+                placed.append((at - int(0.06 * SR) - len(b), b))
+        placed.append((at, c))
+        timing.append({"id": s["id"], "start": round(at / SR, 3), "end": round((at + len(c)) / SR, 3),
+                       "src_start": s["src_start"], "late": round(max(0, at - start) / SR, 3), "tempo": round(f, 3)})
+        cursor = at + len(c)
+    total = max(cursor, int(((segs[-1].get("src_end") or 0) + 0.4) * SR)) + int(0.4 * SR)
+    y = np.zeros(total, np.float32)
+    for at, c in placed:
+        y[at:at + len(c)] += c[:max(0, total - at)]
+    return y, timing
+
+
+def _finish(pdir: Path, proj: Dict, y: np.ndarray, timing: List[Dict], cfg: DubConfig, tone_lvl: float,
+            out: Optional[Path]) -> Dict:
+    from ..audio.io import save_audio
+
     if tone_lvl:
         from scipy.signal import lfilter
 
