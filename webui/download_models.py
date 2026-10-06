@@ -93,6 +93,26 @@ def dl_llm() -> None:
     subprocess.run([str(paths.OLLAMA_EXE), "pull", LLM_MODEL], check=True)
 
 
+def dl_indextts() -> None:
+    """IndexTTS-2.5 weights (AI 配音); its helper models (w2v-bert, codec, campplus,
+    BigVGAN) are fetched by the worker on first load into models/indextts-2.5/hf_cache."""
+    from huggingface_hub import hf_hub_download
+    from modelscope import snapshot_download
+
+    d = paths.MODELS / "indextts-2.5"
+    snapshot_download("IndexTeam/IndexTTS-2.5", local_dir=str(d))
+    # the vocoder is not on ModelScope (and the worker's hf-mirror fallback is unreliable);
+    # large files over the proxy often break mid-transfer, the download resumes
+    for name in ("config.json", "bigvgan_generator.pt"):
+        for attempt in range(8):
+            try:
+                hf_hub_download("nvidia/bigvgan_v2_22khz_80band_256x", name, local_dir=str(d / "hf_cache" / "bigvgan"))
+                break
+            except Exception:
+                if attempt == 7:
+                    raise
+
+
 GROUPS = {
     "whisper": lambda: dl_hf("whisper"),
     "openai-whisper": dl_openai_whisper,
@@ -103,6 +123,7 @@ GROUPS = {
     "rnnoise": dl_rnnoise,
     "campplus": dl_campplus,
     "llm": dl_llm,
+    "indextts": dl_indextts,
 }
 
 

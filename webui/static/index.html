@@ -222,6 +222,16 @@ details.sec[open]>summary.sec-title{margin-bottom:12px}
 .ed-row input.tx{font-size:15px;padding:6px 10px}
 .ed-row.low input.tx{border-left:3px solid var(--warn)}
 .ed-row .ops{display:flex;gap:3px}
+.dub-list{display:flex;flex-direction:column;gap:4px;max-height:640px;overflow:auto;padding-right:4px}
+.dub-row{display:grid;grid-template-columns:30px 62px minmax(0,1fr) 70px auto;gap:8px;align-items:start;padding:6px 6px;border-radius:9px}
+.dub-row.cur{background:var(--accent-weak)}
+.dub-row.bad input.tx{border-left:3px solid var(--warn)}
+.dub-row .idx{font:12px var(--mono);color:var(--faint);padding-top:8px;text-align:right}
+.dub-row .badge{margin-top:6px;justify-content:center}
+.dub-row input.tx{font-size:15px;padding:6px 10px}
+.dub-row input.tt{font:12px var(--mono);padding:6px 7px}
+.dub-row .qa{font-size:11.5px;color:var(--muted);padding:3px 2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dub-row .ops{display:flex;gap:4px;align-items:center;flex-wrap:wrap}
 .note{background:var(--warn-weak);border:1px solid color-mix(in srgb,var(--warn) 30%,transparent);color:var(--text-2);border-radius:var(--r);padding:9px 13px;font-size:13px;margin-bottom:12px}
 .md{font-size:13px}
 .md h3{font-size:14px;margin:4px 0 8px}
@@ -300,6 +310,7 @@ const ICONS = {
   audio: '<path d="M2 13a2 2 0 0 0 2-2V7a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0V4a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0v-4a2 2 0 0 1 2-2"/>',
   settings: '<path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
   sliders: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+  voice: '<path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10a7 7 0 0 1-14 0"/><path d="M12 17v4"/><path d="m19.5 2.5.7 1.6 1.6.7-1.6.7-.7 1.6-.7-1.6-1.6-.7 1.6-.7z" fill="currentColor"/>',
   record: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4" fill="currentColor"/>',
   scissors: '<circle cx="6" cy="6" r="3"/><path d="M8.12 8.12 12 12"/><path d="M20 4 8.12 15.88"/><circle cx="6" cy="18" r="3"/><path d="M14.8 14.8 20 20"/>',
   video: '<path d="m16 13 5.2 3.1a.5.5 0 0 0 .8-.4V8.3a.5.5 0 0 0-.8-.4L16 11"/><rect x="2" y="6" width="14" height="12" rx="2"/>',
@@ -481,6 +492,8 @@ const TASKS = {
       "轻处理": { stCleanup: false, stDenoise: "light", stDeess: "4", stMud: "-2", stPresence: "1.5", stCompThr: "-24", stCompRatio: "2" },
       "强降噪": { stDenoise: "strong", stHighpass: "100", stDeess: "8" },
       "短视频": { stCleanup: true, stLoudness: "-14", stPresence: "3.5", stAir: "1.5", stFormat: "aac", stBitrate: "256k" },
+      // AI voice: no room noise / mouth clicks, breaths were added on purpose, top end already treated
+      "AI 配音": { stCleanup: false, stDenoise: "off", stDeclick: false, stDeess: "4", stMud: "-2", stPresence: "1.5", stCompThr: "-22", stCompRatio: "2.5" },
     },
   },
   proofread: {
@@ -605,13 +618,14 @@ const PAGES = {
   align: { nav: "语音对齐", icon: "mic" }, lyrics: { nav: "歌词对齐", icon: "music" }, separate: { nav: "人声分离", icon: "wave" },
   roughcut: { nav: "语音粗剪", icon: "scissors" }, studio: { nav: "音频处理", icon: "sliders" },
   recorder: { nav: "录音棚", icon: "record", render: m => renderRecorder(m) },
+  dubbing: { nav: "AI 配音", icon: "voice", render: m => renderDubbing(m) },
   convert: { nav: "格式转换", icon: "convert" }, translate: { nav: "字幕翻译", icon: "translate" }, proofread: { nav: "字幕校对", icon: "check" },
   formats: { nav: "格式与样式", icon: "book", render: renderFormats },
   jobs: { nav: "任务记录", icon: "history", render: renderJobs },
   tests: { nav: "单元测试", icon: "flask", render: renderTests },
 };
 for (const k of Object.keys(TASKS)) PAGES[k].render = () => renderTask(k);
-const NAV = [["", ["status"]], ["对齐", ["align", "lyrics", "separate"]], ["录音与剪辑", ["recorder", "studio", "roughcut"]], ["字幕工具", ["convert", "translate", "proofread"]], ["系统", ["formats", "jobs", "tests"]]];
+const NAV = [["", ["status"]], ["对齐", ["align", "lyrics", "separate"]], ["录音与剪辑", ["recorder", "dubbing", "studio", "roughcut"]], ["字幕工具", ["convert", "translate", "proofread"]], ["系统", ["formats", "jobs", "tests"]]];
 let current = location.hash.slice(1) || store.get("page", "status");
 
 function renderNav() {
@@ -1941,6 +1955,356 @@ async function renderRecorder(m) {
   if (!REC.chans) REC.chans = Array.from({ length: +st.ch }, () => new Float32Array(0));
   view = { start: 0, span: Math.max(recLen(), REC.sr * 10) };
   draw();
+}
+
+// ---------------------------------------------------------------- AI 配音 (dubbing)
+const DUB_STATUS = { pending: ["待生成", ""], queued: ["排队中", "run"], running: ["生成中", "run"], done: ["完成", "ok"],
+  check: ["需检查", "warn"], edited: ["已修改", "warn"], error: ["失败", "err"] };
+const AI_STUDIO = TASKS.studio.presets["AI 配音"];
+async function api(url, body, method = "POST") {
+  const opt = body instanceof FormData ? { method, body } : body === undefined ? { method }
+    : { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const r = await fetch(url, opt);
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(typeof d.detail === "string" ? d.detail : r.statusText);
+  return d;
+}
+function renderDubbing(m) {
+  const pid = store.get("dub.project", null);
+  return pid ? renderDubProject(m, pid) : renderDubSetup(m);
+}
+
+function dubSlider(st, key, label, min, max, step, fmt, hint, onset) {
+  const out = h("b", { style: "font:600 12px var(--mono);color:var(--accent)" }, fmt(+st[key]));
+  const r = h("input", { type: "range", min, max, step, value: st[key], style: "width:100%" });
+  r.addEventListener("input", () => { st[key] = +r.value; out.textContent = fmt(+r.value); });
+  r.addEventListener("change", () => onset && onset(key, +r.value));
+  return h("div", { class: "field" }, h("label", { style: "display:flex;justify-content:space-between" }, label, out), r, hint ? h("div", { class: "hint" }, hint) : null);
+}
+function dubCheck(st, key, label, onset) {
+  return h("div", { class: "field", style: "justify-content:flex-end" }, h("label", { class: "check" },
+    h("input", { type: "checkbox", checked: !!st[key], onchange: e => { st[key] = e.target.checked; onset && onset(key, st[key]); } }), label));
+}
+function dubSelect(st, key, label, opts, onset, hint) {
+  const s = h("select", { onchange: e => { st[key] = +e.target.value; onset && onset(key, st[key]); } },
+    opts.map(([v, l]) => h("option", { value: v, selected: +st[key] === v }, l)));
+  return h("div", { class: "field" }, h("label", {}, label), s, hint ? h("div", { class: "hint" }, hint) : null);
+}
+// the parameters shared by the setup page and an open project
+function dubParams(st, onset) {
+  const voice = h("div", { class: "grid" },
+    dubSlider(st, "speed", "语速", 0.95, 1.05, 0.01, v => v.toFixed(2) + "×", "0.95 – 1.05 倍；生成后还会把偏快 / 偏慢的句子拉齐", onset),
+    dubSlider(st, "emo_alpha", "情绪强度", 0, 1, 0.05, v => Math.round(v * 100) + "%", "情绪参考 B 的影响程度（没有 B 时不起作用）", onset),
+    dubCheck(st, "qa", "自动校验：识别每句，读错自动重生成", onset),
+    dubSelect(st, "max_tries", "每句最多尝试", [[1, "1 次"], [2, "2 次"], [3, "3 次（推荐）"], [4, "4 次"], [5, "5 次"]], onset));
+  const natural = h("div", { class: "grid" },
+    dubCheck(st, "breaths", "插入真实换气声（取自音色 A）", onset),
+    dubSelect(st, "room_tone_db", "房间底噪", [[-66, "轻微（推荐）"], [-60, "明显"], [0, "关（纯数字静音）"]], onset),
+    dubSlider(st, "pause_jitter", "停顿随机变化", 0, 0.2, 0.01, v => "±" + Math.round(v * 100) + "%", "", onset),
+    dubSelect(st, "rate_tolerance", "语速拉齐", [[0.06, "偏差 > 6% 时（推荐）"], [0.1, "偏差 > 10% 时"], [0, "关"]], onset),
+    dubSlider(st, "deharsh_db", "去金属感 (dB)", 0, 4, 0.5, v => "-" + v.toFixed(1), "压 7.5 kHz 以上的声码器毛刺", onset),
+    dubSlider(st, "air", "空气感", 0, 1, 0.05, v => Math.round(v * 100) + "%", "补回 22 kHz 模型缺失的 11 kHz 以上泛音", onset),
+    dubSlider(st, "warmth", "温暖度", 0, 1, 0.05, v => Math.round(v * 100) + "%", "轻微谐波饱和", onset),
+    dubSlider(st, "emphasis_db", "重读提升 (dB)", 0, 6, 0.5, v => "+" + v.toFixed(1), "对 <重|…> 标记的词", onset));
+  return { voice, natural };
+}
+
+function refPicker(title, hint) {
+  let file = null, rec = "";
+  const t1 = h("div", { class: "t1" }, title), t2 = h("div", { class: "t2" }, hint);
+  const prev = h("audio", { controls: true, style: "display:none" });
+  const sel = h("select", {}, h("option", { value: "" }, "—— 或选择录音棚里的录音 ——"));
+  const fi = h("input", { type: "file", accept: "audio/*,video/*", style: "display:none" });
+  const drop = h("div", { class: "drop", onclick: () => fi.click() }, h("div", { class: "up" }, ico("upload")), t1, t2, fi);
+  const show = (name, sub, url) => { drop.classList.add("has"); t1.textContent = name; t2.textContent = sub; prev.src = url; prev.style.display = ""; };
+  const pick = f => { if (!f) return; file = f; rec = ""; sel.value = ""; show(f.name, fmtSize(f.size) + " · 点击更换", URL.createObjectURL(f)); };
+  fi.addEventListener("change", e => pick(e.target.files[0]));
+  fi.addEventListener("click", e => e.stopPropagation());
+  drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", e => { e.preventDefault(); drop.classList.remove("over"); pick(e.dataTransfer.files[0]); });
+  sel.addEventListener("change", () => { rec = sel.value; if (rec) { file = null; show("录音 " + rec, "来自录音棚", "/recordings/" + encodeURIComponent(rec)); } });
+  fetch("/api/recordings").then(r => r.json()).then(l => l.forEach(x => sel.append(h("option", { value: x.name }, `${x.name} · ${fmtSize(x.size)}`)))).catch(() => {});
+  return { el: h("div", { style: "display:flex;flex-direction:column;gap:8px" }, drop, sel, prev), get: () => ({ file, rec }) };
+}
+
+async function renderDubSetup(m) {
+  const st = Object.assign({ speed: 1.0, emo_alpha: 0.8, qa: true, max_tries: 3, breaths: true, room_tone_db: -66, pause_jitter: 0.1,
+    rate_tolerance: 0.06, deharsh_db: 2, air: 0.4, warmth: 0.25, emphasis_db: 3 }, store.get("dub.cfg", {}));
+  const saveSt = () => store.set("dub.cfg", st);
+  m.append(pageHead("AI 配音", "文稿预处理 → 音色 A + 情绪 B 逐句生成 → 逐句试听 / 修改 / 重新生成 → 去机械感合成 → 送去音频处理加 BGM、导出。", "IndexTTS-2.5"));
+  const status = await fetch("/api/tts/status").then(r => r.json()).catch(() => ({}));
+  if (!status.available) m.append(h("div", { class: "note" }, "IndexTTS-2.5 还没有安装（需要 tools/index-tts/.venv 和 models/indextts-2.5），请先运行 setup.bat。"));
+  const ws = h("div", { class: "workspace", style: "grid-template-columns:minmax(0,1fr) minmax(340px,420px)" });
+  m.append(ws);
+
+  // ---- script
+  const ta = h("textarea", { style: "min-height:340px;font:15px/1.9 var(--font)", placeholder: "粘贴配音文稿，然后点「一键预处理」\n\n手动标记：多音字 <行|hang2>   停顿 <停|0.5>   重读 <重|关键词>" });
+  ta.value = store.get("dub.script", "");
+  const info = h("span", { class: "muted", style: "font-size:12.5px" });
+  const prepBox = h("div");
+  let items = [], raw = null;
+  ta.addEventListener("input", () => { store.set("dub.script", ta.value); if (items.length) info.textContent = "文本已修改，多音字位置可能失效：再点一次「一键预处理」"; });
+  const insert = (fn) => {
+    const a = ta.selectionStart, b = ta.selectionEnd, sel = ta.value.slice(a, b);
+    const s = fn(sel);
+    if (!s) return;
+    ta.setRangeText(s, a, b, "end"); ta.focus(); store.set("dub.script", ta.value);
+  };
+  const tool = (label, title, fn, icon) => h("button", { class: "btn small", type: "button", title, onclick: fn }, icon ? ico(icon) : null, label);
+  const prep = async () => {
+    if (!ta.value.trim()) return alert("请先输入文稿");
+    try {
+      const r = await api("/api/tts/prepare", { text: ta.value });
+      if (r.text !== ta.value) raw = ta.value;
+      ta.value = r.text; store.set("dub.script", ta.value);
+      showPrep(r);
+    } catch (e) { alert(e.message); }
+  };
+  function setPoly(it, py) {
+    const cur = it.mark || it.char;
+    if (ta.value.substr(it.pos, cur.length) !== cur) { alert("文本已改动，请再点一次「一键预处理」"); return false; }
+    const nw = py ? `<${it.char}|${py}>` : it.char;
+    ta.value = ta.value.slice(0, it.pos) + nw + ta.value.slice(it.pos + cur.length);
+    const d = nw.length - cur.length;
+    items.forEach(o => { if (o.pos > it.pos) o.pos += d; });
+    it.mark = py ? nw : null;
+    store.set("dub.script", ta.value);
+    return true;
+  }
+  function showPrep(r) {
+    items = r.polyphones.map(p => ({ ...p, mark: null }));
+    const longest = Math.max(0, ...r.segments.map(s => s.text.length));
+    info.textContent = `${r.segments.length} 句 · 最长 ${longest} 字 · ${items.length} 个多音字待确认`;
+    prepBox.innerHTML = "";
+    if (items.length) {
+      const rows = items.map(it => {
+        const ctx = it.context, k = ctx.indexOf(it.char);
+        const sel = h("select", { style: "width:auto;min-width:150px", onchange: e => { if (!setPoly(it, e.target.value)) e.target.value = it.mark ? it.mark.slice(3, -1).toLowerCase() : ""; } },
+          h("option", { value: "" }, `不标注（模型判断）`),
+          it.candidates.map(c => h("option", { value: c }, c + (c === it.default ? "  · 按上下文推荐" : ""))));
+        return h("div", { class: "row", style: "gap:8px;padding:5px 0;border-bottom:1px dashed var(--line)" },
+          h("span", { style: "font-size:15px;min-width:150px" }, ctx.slice(0, k), h("b", { style: "color:var(--accent)" }, it.char), ctx.slice(k + 1)), sel);
+      });
+      prepBox.append(sec("多音字", h("div", {}, h("div", { class: "hint", style: "margin-bottom:6px" }, "选择读音会写成 <字|拼音> 标记，模型按标注读；不确定的保持「不标注」"),
+        h("div", { style: "max-height:300px;overflow:auto" }, rows)), { collapsible: true, open: true }));
+    }
+    prepBox.append(sec(`分句预览（${r.segments.length} 句，每句单独生成）`, h("ol", { style: "margin:0;padding-left:22px;line-height:1.9" },
+      r.segments.map(s => h("li", {}, s.text, h("span", { class: "muted", style: "font-size:11.5px" }, `  停 ${s.pause_after}s`)))), { collapsible: true, open: false }));
+  }
+  const scriptCard = h("div", { class: "card" },
+    h("h3", {}, ico("file"), "1 · 文稿", info),
+    h("div", { class: "toolbar" },
+      h("button", { class: "btn primary small", type: "button", onclick: prep, title: "删除括号备注 / 表情 / 链接，数字和符号转读法，统一标点，分句并列出多音字" }, ico("sparkles"), "一键预处理"),
+      tool("撤销预处理", "恢复预处理前的原文", () => { if (raw != null) { ta.value = raw; raw = null; store.set("dub.script", ta.value); items = []; prepBox.innerHTML = ""; info.textContent = ""; } }),
+      h("span", { class: "sp" }),
+      tool("停顿", "在光标处插入停顿 <停|秒>", () => insert(() => { const s = prompt("停顿多少秒？", "0.5"); return s && !isNaN(+s) ? `<停|${+s}>` : null; })),
+      tool("重读", "选中词语后点击：<重|词>", () => insert(sel => sel ? `<重|${sel}>` : (alert("先选中要重读的词"), null))),
+      tool("注音", "选中一个字后点击：<字|拼音>", () => insert(sel => {
+        if ([...sel].length !== 1) { alert("先选中一个字"); return null; }
+        const py = prompt(`“${sel}”读作（拼音 + 声调数字，如 hang2、zhong4）`, "");
+        return py && /^[a-zA-Züv]+[1-5]$/.test(py.trim()) ? `<${sel}|${py.trim().toLowerCase()}>` : null;
+      }))),
+    ta, h("div", { class: "hint", style: "margin-top:6px" },
+      "预处理：删除（备注）【提示】、表情和链接；1w → 一万、3.5% → 百分之三点五、2026-10-06 → 二零二六年十月六日、10:30 → 十点三十分、¥99 → 九十九元、手机号逐位读；长句按逗号拆开、过短的句子并入前句。"),
+    prepBox);
+
+  // ---- voices + params + start
+  const A = refPicker("音色参考 A（必填）", "要克隆的声音：5-15 秒干净人声");
+  const B = refPicker("情绪参考 B（可选）", "想模仿的语气 / 情绪；不选则用 A 本身的语气");
+  const { voice, natural } = dubParams(st, () => saveSt());
+  const title = h("input", { type: "text", value: "", placeholder: "例如：第 3 期口播" });
+  const msg = h("span", { class: "hint" });
+  const startBtn = h("button", { class: "btn primary block", type: "button" }, ico("play"), "创建并开始逐句生成");
+  startBtn.addEventListener("click", async () => {
+    saveSt();
+    if (!ta.value.trim()) return alert("请先输入文稿");
+    const a = A.get(), b = B.get();
+    if (!a.file && !a.rec) return alert("请上传或选择音色参考 A");
+    const fd = new FormData();
+    fd.append("script", ta.value); fd.append("title", title.value.trim());
+    fd.append("config", JSON.stringify(st));
+    if (a.file) fd.append("spk", a.file); else fd.append("spk_recording", a.rec);
+    if (b.file) fd.append("emo", b.file); else if (b.rec) fd.append("emo_recording", b.rec);
+    startBtn.disabled = true; msg.textContent = "上传中…";
+    try { const d = await api("/api/tts/projects", fd); store.set("dub.project", d.id); go("dubbing"); }
+    catch (e) { msg.textContent = ""; alert(e.message); startBtn.disabled = false; }
+  });
+  const panel = h("div", { class: "panel" },
+    h("div", { class: "panel-head" }, ico("mic"), "2 · 声音与参数"),
+    h("div", { class: "panel-body" },
+      sec("音色 A", A.el, { n: 1 }),
+      sec("情绪 B", h("div", {}, B.el, h("div", { class: "hint", style: "margin-top:6px" }, "例：A 是主播平淡的录音，B 是资深博主激昂的片段 → 全片都是 A 的声音、B 的情绪")), { n: 2 }),
+      sec("生成", voice, { n: 3 }),
+      sec("去机械感（合成总音频时处理）", natural, { collapsible: true, open: false }),
+      sec("项目", h("div", { class: "field" }, h("label", {}, "名称"), title))),
+    h("div", { class: "panel-foot" }, startBtn, msg));
+  const left = h("div", {}, scriptCard);
+  ws.append(left, panel);
+
+  // ---- recent projects
+  const list = await fetch("/api/tts/projects").then(r => r.json()).catch(() => []);
+  if (list.length) left.append(h("div", { class: "card" }, h("h3", {}, ico("history"), "最近的配音项目"),
+    h("div", { class: "tbl" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "名称"), h("th", {}, "创建"), h("th", {}, "进度"), h("th", {}, ""))),
+      h("tbody", {}, list.slice(0, 20).map(p => h("tr", { class: "click", onclick: () => { store.set("dub.project", p.id); go("dubbing"); } },
+        h("td", {}, p.title), h("td", { class: "muted" }, new Date(p.created * 1000).toLocaleString()),
+        h("td", {}, `${p.done} / ${p.n} 句`, p.mix ? h("span", { class: "badge ok", style: "margin-left:6px" }, "已合成") : null),
+        h("td", { style: "text-align:right" }, h("span", { class: "btn small" }, "打开")))))))));
+}
+
+async function renderDubProject(m, pid) {
+  let P;
+  try { P = await api("/api/tts/projects/" + pid, undefined, "GET"); }
+  catch { store.set("dub.project", null); return go("dubbing"); }
+  const base = "/api/tts/projects/" + pid;
+  m.append(pageHead(P.title || "AI 配音", "逐句试听；改文字或停顿后重新生成这一句，总音频会自动重新合成。", "AI 配音",
+    h("div", { class: "row" }, h("button", { class: "btn", onclick: () => { store.set("dub.project", null); go("dubbing"); } }, ico("edit"), "新建 / 项目列表"))));
+  const player = new Audio();
+  let playing = null;                         // sentence id being auditioned
+
+  // ---- mix card
+  const prog = h("span", { class: "badge" });
+  const mixEl = h("audio", { controls: true, style: "margin-top:4px" });
+  const mixInfo = h("span", { class: "muted", style: "font-size:12.5px" });
+  const fmtSel = h("select", { style: "width:auto" }, [["mp3", "MP3 320k"], ["wav", "WAV 24 bit"], ["aac", "AAC (m4a)"], ["flac", "FLAC"], ["opus", "Opus"]].map(([v, l]) => h("option", { value: v }, l)));
+  const chSel = h("select", { style: "width:auto" }, h("option", { value: 1 }, "单声道"), h("option", { value: 2 }, "立体声"));
+  const exportOut = h("span");
+  const act = async (url, body) => { try { P = await api(url, body); update(); } catch (e) { alert(e.message); } };
+  const mixCard = h("div", { class: "card" },
+    h("h3", {}, ico("audio"), "总音频", prog, mixInfo),
+    mixEl,
+    h("div", { class: "row", style: "margin-top:10px" },
+      h("button", { class: "btn", type: "button", title: "生成还没有音频、已修改或失败的句子", onclick: () => act(base + "/synth", {}) }, ico("play"), "生成剩余句子"),
+      h("button", { class: "btn", type: "button", title: "用当前的句子和去机械感参数重新拼接", onclick: () => act(base + "/assemble") }, ico("layers"), "重新合成总音频"),
+      h("span", { class: "sp", style: "flex:1" }),
+      fmtSel, chSel,
+      h("button", { class: "btn", type: "button", onclick: async e => {
+        const b = e.currentTarget; b.disabled = true;
+        try { const r = await api(base + "/export", { format: fmtSel.value, channels: +chSel.value }); exportOut.innerHTML = ""; exportOut.append(h("a", { class: "btn small", href: r.url, download: r.name }, ico("download"), `${r.name} · ${fmtSize(r.size)}`)); }
+        catch (err) { alert(err.message); } b.disabled = false;
+      } }, ico("download"), "导出"),
+      exportOut,
+      h("button", { class: "btn primary", type: "button", title: "低切 / EQ / 压缩 / 响度 / 背景音乐 / 导出，沿用口播音频处理", onclick: async () => {
+        try {
+          const r = await api(base + "/to-studio");
+          store.set("form.studio", { ...AI_STUDIO, _preset: "AI 配音" });
+          sessionStorage.setItem("studio.recording", r.name); go("studio");
+        } catch (e) { alert(e.message); }
+      } }, ico("sliders"), "送去音频处理（BGM / 响度 / 导出）")));
+  m.append(mixCard);
+
+  // ---- references + settings
+  const st = { ...P.config };
+  const onset = async (k, v) => { try { await api(base + "/config", { [k]: v }); } catch (e) { alert(e.message); } };
+  const { voice, natural } = dubParams(st, onset);
+  m.append(h("div", { class: "card" }, h("h3", {}, ico("settings"), "声音与参数",
+      h("span", { class: "muted", style: "font-weight:400;font-size:12px" }, "生成参数对之后生成的句子生效；去机械感参数点「重新合成总音频」生效")),
+    h("div", { class: "split" },
+      h("div", { class: "field" }, h("label", {}, "音色参考 A"), h("audio", { controls: true, src: P.spk_url })),
+      h("div", { class: "field" }, h("label", {}, "情绪参考 B"), P.emo_url ? h("audio", { controls: true, src: P.emo_url }) : h("span", { class: "muted" }, "未使用（语气跟随 A）"))),
+    h("details", { class: "sec" }, h("summary", { class: "sec-title" }, "调整参数", h("span", { class: "sp" }), ico("chev", "chev")),
+      voice, h("div", { class: "sec-title", style: "margin-top:14px" }, "去机械感"), natural)));
+
+  // ---- sentences
+  const listEl = h("div", { class: "dub-list" });
+  m.append(h("div", { class: "card" }, h("h3", {}, ico("timeline"), "逐句", h("span", { class: "muted", style: "font-weight:400;font-size:12px" },
+    "可直接改文字（支持 <字|拼音> <重|词> 标记）· 改完点「重新生成」· 停顿是这句之后的静音秒数")), listEl));
+  const rows = new Map();
+  function row(s) {
+    const badge = h("span", { class: "badge" });
+    const tx = h("input", { type: "text", class: "tx", value: s.text });
+    tx.addEventListener("input", () => { tx.dataset.dirty = "1"; });
+    tx.addEventListener("keydown", e => { if (e.key === "Enter") regen(); });
+    const pause = h("input", { type: "number", class: "tt", step: "0.05", min: "0", max: "5", value: s.pause_after, title: "这句之后停顿（秒）" });
+    pause.addEventListener("change", async () => { await act(`${base}/segments/${s.id}`, { pause_after: +pause.value }); act(base + "/assemble"); });
+    const playB = h("button", { class: "icon", type: "button", title: "试听这一句" }, ico("play"));
+    const locB = h("button", { class: "icon", type: "button", title: "在总音频中从这一句开始播放" }, ico("audio"));
+    const regenB = h("button", { class: "btn small", type: "button" }, "重新生成");
+    const qa = h("div", { class: "qa" });
+    const takes = h("select", { style: "width:auto;font-size:12px;padding:3px 26px 3px 8px", title: "历次生成的版本" });
+    takes.addEventListener("change", () => act(`${base}/segments/${s.id}`, { take: takes.value }));
+    function regen() {
+      const body = { regenerate: true };
+      if (tx.dataset.dirty) body.text = tx.value;
+      delete tx.dataset.dirty;
+      act(`${base}/segments/${s.id}`, body);
+    }
+    regenB.addEventListener("click", regen);
+    playB.addEventListener("click", () => {
+      const cur = rows.get(s.id).seg;
+      if (!cur.url) return;
+      if (playing === s.id && !player.paused) { player.pause(); return; }
+      mixEl.pause(); player.src = cur.url; player.play(); playing = s.id;
+    });
+    locB.addEventListener("click", () => {
+      const t = (P.mix?.timing || []).find(x => x.id === s.id);
+      if (!t) return alert("总音频里还没有这一句：先合成总音频");
+      player.pause(); mixEl.currentTime = t.start; mixEl.play();
+    });
+    const el = h("div", { class: "dub-row" }, h("span", { class: "idx" }, s.id), badge,
+      h("div", { style: "min-width:0" }, tx, qa), pause,
+      h("div", { class: "ops" }, playB, locB, regenB, takes));
+    const r = { el, badge, tx, pause, qa, takes, playB, locB, regenB, seg: s, sig: "" };
+    rows.set(s.id, r);
+    return r;
+  }
+  function fill(r, s) {
+    r.seg = s;
+    const sig = JSON.stringify([s.status, s.audio, s.text, s.pause_after, s.qa, (s.takes || []).length, s.error]);
+    if (sig === r.sig) return;
+    r.sig = sig;
+    const [lab, cls] = DUB_STATUS[s.status] || [s.status, ""];
+    r.badge.className = "badge " + cls; r.badge.textContent = lab;
+    if (!r.tx.dataset.dirty && document.activeElement !== r.tx) r.tx.value = s.text;
+    if (document.activeElement !== r.pause) r.pause.value = s.pause_after;
+    r.el.classList.toggle("bad", s.status === "check" || s.status === "error");
+    r.playB.disabled = !s.url;
+    r.regenB.disabled = s.status === "queued" || s.status === "running";
+    r.qa.innerHTML = "";
+    if (s.error && s.status === "error") r.qa.append(h("span", { class: "err" }, s.error));
+    else if (s.qa) {
+      const e = s.qa.error;
+      r.qa.append(h("span", { class: e == null ? "muted" : e > (P.config.max_error || 0.12) ? "err" : "ok" },
+        e == null ? "未校验" : e === 0 ? "校验通过" : `误读 ${Math.round(e * 100)}%`), "  识别：", s.qa.heard || "");
+    }
+    const tk = s.takes || [];
+    r.takes.style.display = tk.length > 1 ? "" : "none";
+    r.takes.innerHTML = "";
+    tk.forEach((t, i) => r.takes.append(h("option", { value: t.file, selected: t.file === s.audio },
+      `版本 ${i + 1}` + (t.qa && t.qa.error != null ? ` · 误读 ${Math.round(t.qa.error * 100)}%` : ""))));
+  }
+  function update() {
+    const segs = P.segments;
+    for (const s of segs) {
+      const r = rows.get(s.id) || row(s);
+      if (!r.el.parentNode) listEl.append(r.el);
+      fill(r, s);
+    }
+    const done = segs.filter(s => s.audio).length, bad = segs.filter(s => s.status === "check" || s.status === "error").length;
+    prog.className = "badge " + (P.busy ? "run" : done === segs.length ? "ok" : "");
+    prog.textContent = (P.busy ? (P.running === "mix" ? "合成总音频中 · " : "生成中 · ") : "") + `${done} / ${segs.length} 句` + (bad ? ` · ${bad} 句需检查` : "");
+    if (P.mix) {
+      const src = P.mix.url;
+      if (mixEl.dataset.src !== src) {
+        const t = mixEl.currentTime, was = !mixEl.paused;
+        mixEl.dataset.src = src; mixEl.src = src;
+        if (was) mixEl.addEventListener("loadedmetadata", () => { mixEl.currentTime = Math.min(t, mixEl.duration || t); mixEl.play(); }, { once: true });
+      }
+      mixInfo.textContent = `${fmtT(P.mix.duration).slice(0, 8)}` + (P.mix.missing?.length ? ` · 缺 ${P.mix.missing.length} 句` : "");
+    } else mixInfo.textContent = "全部生成后自动合成";
+    if (P.error) mixInfo.textContent += ` · 错误：${P.error}`;
+  }
+  update();
+  // highlight the sentence under the mix playhead
+  mixEl.addEventListener("timeupdate", () => {
+    const t = mixEl.currentTime, tm = P.mix?.timing || [];
+    const cur = tm.find(x => t >= x.start - 0.05 && t < x.end + 0.3);
+    rows.forEach((r, id) => r.el.classList.toggle("cur", !!cur && cur.id === id));
+  });
+  const timer = setInterval(async () => {
+    try { P = await api(base, undefined, "GET"); update(); } catch (e) {}
+  }, 1500);
+  window.__pageCleanup = () => { clearInterval(timer); player.pause(); };
 }
 
 // ---------------------------------------------------------------- formats page

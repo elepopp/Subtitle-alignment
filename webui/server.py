@@ -83,6 +83,8 @@ def free_models() -> int:
     with _cache_lock:
         n = len(_model_cache)
         _model_cache.clear()
+    if "subalign.tts.dubbing" in sys.modules:
+        sys.modules["subalign.tts.dubbing"]._ASR.clear()       # QA / emphasis models of AI 配音
     import gc
 
     gc.collect()
@@ -774,6 +776,269 @@ def api_free():
     return {"freed": free_models()}
 
 
+# ------------------------------------------------------------------ AI voice-over (AI 配音)
+DUB_DIR = paths.WORK / "dubbing"
+_tts_queue: "queue.Queue[tuple]" = queue.Queue()
+_tts_state: Dict[str, Dict[str, Any]] = {}          # project id -> {"queued": [sid...], "running": sid, "error": str}
+_tts_lock = threading.Lock()
+
+
+def _dub_dir(pid: str) -> Path:
+    d = DUB_DIR / Path(pid).name
+    if not (d / "project.json").exists():
+        raise HTTPException(404, "project not found")
+    return d
+
+
+def _tts_worker() -> None:
+    from subalign.tts import dubbing
+
+    while True:
+        pid, kind, arg = _tts_queue.get()
+        st = _tts_state.setdefault(pid, {"queued": [], "running": None})
+        try:
+            pdir = DUB_DIR / pid
+            if kind == "synth":
+                with _tts_lock:
+                    if arg in st["queued"]:
+                        st["queued"].remove(arg)
+                    st["running"] = arg
+                dubbing.synth_segment(pdir, arg)
+            elif kind == "assemble":
+                st["running"] = "mix"
+                dubbing.assemble(pdir, dubbing.load(pdir))
+            st.pop("error", None)
+        except Exception as e:
+            log.exception("tts %s %s failed", kind, arg)
+            st["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            st["running"] = None
+            if not st["queued"] and kind == "synth" and st.get("auto_mix"):
+                st["auto_mix"] = False
+                _tts_queue.put((pid, "assemble", None))
+
+
+def _tts_enqueue(pid: str, sids: List[int], mix: bool = True) -> None:
+    with _tts_lock:
+        st = _tts_state.setdefault(pid, {"queued": [], "running": None})
+        for sid in sids:
+            if sid not in st["queued"] and st["running"] != sid:
+                st["queued"].append(sid)
+                _tts_queue.put((pid, "synth", sid))
+        st["auto_mix"] = mix or st.get("auto_mix", False)
+
+
+def _dub_view(pid: str) -> Dict[str, Any]:
+    from subalign.tts import dubbing
+
+    proj = dubbing.load(DUB_DIR / pid)
+    st = _tts_state.get(pid, {})
+    queued = set(st.get("queued", []))
+    for s in proj["segments"]:
+        if s["id"] in queued:
+            s["status"] = "queued"
+        elif s.get("status") == "running" and st.get("running") != s["id"]:
+            s["status"] = "error" if not s.get("audio") else "done"     # interrupted by a restart
+        s["url"] = f"/dub/{pid}/{s['audio']}?v={s.get('updated', 0)}" if s.get("audio") else None
+        for t in s.get("takes", []):
+            t["url"] = f"/dub/{pid}/{t['file']}"
+    if proj.get("mix"):
+        proj["mix"]["url"] = f"/dub/{pid}/{proj['mix']['file']}?v={proj['mix']['built']}"
+    proj.update(id=pid, busy=bool(st.get("queued")) or st.get("running") is not None, running=st.get("running"),
+                error=st.get("error"), spk_url=f"/dub/{pid}/ref/{Path(proj['spk']).name}",
+                emo_url=f"/dub/{pid}/ref/{Path(proj['emo']).name}" if proj.get("emo") else None)
+    return proj
+
+
+@app.get("/api/tts/status")
+def tts_status():
+    from subalign.tts.dubbing import WORKER
+
+    return {"available": WORKER.available(), "running": bool(WORKER.proc and WORKER.proc.poll() is None),
+            "python": str(WORKER.python()), "model": str(ROOT / "models" / "indextts-2.5")}
+
+
+@app.post("/api/tts/prepare")
+def tts_prepare(body: Dict[str, Any] = Body(...)):
+    """One-click script clean-up: notes / emoji removed, numbers read out, sentences split,
+    polyphonic characters listed for review."""
+    from subalign.tts import textprep
+
+    return textprep.prepare(body.get("text", ""), remove_notes=body.get("remove_notes", True),
+                            max_chars=int(body.get("max_chars") or 60))
+
+
+async def _ref_audio(dst: Path, upload: Optional[UploadFile], recording: str, prev: Optional[Path] = None) -> Optional[Path]:
+    dst.mkdir(parents=True, exist_ok=True)
+    if upload is not None and upload.filename:
+        return await _save_upload(upload, dst)
+    if recording:
+        src = RECORDINGS / Path(recording).name
+        if not src.exists():
+            raise HTTPException(400, "recording not found")
+        shutil.copy(src, dst / src.name)
+        return dst / src.name
+    return prev
+
+
+def _trim_reference(p: Path, max_s: float = 15.0) -> Path:
+    """IndexTTS only uses ~15 s of a reference; long uploads are cut (and converted to wav)."""
+    from subalign.audio.io import load_audio, save_audio
+
+    y = load_audio(p, 24000)
+    if p.suffix.lower() == ".wav" and len(y) <= max_s * 24000:
+        return p
+    out = p.with_name(p.stem + ".ref.wav")
+    save_audio(out, y[:int(max_s * 24000)], 24000)
+    return out
+
+
+@app.post("/api/tts/projects")
+async def tts_create(script: str = Form(...), title: str = Form(""), config: str = Form("{}"),
+                     spk: Optional[UploadFile] = File(None), spk_recording: str = Form(""),
+                     emo: Optional[UploadFile] = File(None), emo_recording: str = Form(""), start: bool = Form(True)):
+    from subalign.tts import dubbing
+
+    if not script.strip():
+        raise HTTPException(400, "请输入文稿")
+    pid = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+    pdir = DUB_DIR / pid
+    spk_p = await _ref_audio(pdir / "ref", spk, spk_recording)
+    if spk_p is None:
+        raise HTTPException(400, "请上传或录制音色参考音频 A")
+    emo_p = await _ref_audio(pdir / "ref", emo, emo_recording)
+    spk_p, emo_p = _trim_reference(spk_p), _trim_reference(emo_p) if emo_p else None
+    try:
+        cfg = dubbing.DubConfig(**{k: v for k, v in json.loads(config).items() if k in dubbing.DubConfig.__dataclass_fields__})
+    except (json.JSONDecodeError, TypeError) as e:
+        raise HTTPException(400, f"config: {e}")
+    proj = dubbing.create_project(pdir, script, spk_p, emo_p, cfg, title)
+    if start:
+        _tts_enqueue(pid, [s["id"] for s in proj["segments"]])
+    return _dub_view(pid)
+
+
+@app.get("/api/tts/projects")
+def tts_list():
+    out = []
+    for d in sorted(DUB_DIR.glob("*/project.json"), reverse=True) if DUB_DIR.exists() else []:
+        try:
+            p = json.loads(d.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        segs = p.get("segments", [])
+        out.append({"id": d.parent.name, "title": p.get("title"), "created": p.get("created"), "n": len(segs),
+                    "done": sum(1 for s in segs if s.get("audio")), "mix": bool(p.get("mix"))})
+    return out
+
+
+@app.get("/api/tts/projects/{pid}")
+def tts_get(pid: str):
+    _dub_dir(pid)
+    return _dub_view(pid)
+
+
+@app.post("/api/tts/projects/{pid}/synth")
+def tts_synth(pid: str, body: Dict[str, Any] = Body({})):
+    """Generate sentences: ``ids`` (default: every sentence without a current take)."""
+    from subalign.tts import dubbing
+
+    pdir = _dub_dir(pid)
+    proj = dubbing.load(pdir)
+    ids = body.get("ids") or [s["id"] for s in proj["segments"] if not s.get("audio") or s.get("status") in ("edited", "error")]
+    _tts_enqueue(pid, [int(i) for i in ids], mix=body.get("mix", True))
+    return _dub_view(pid)
+
+
+@app.post("/api/tts/projects/{pid}/segments/{sid}")
+def tts_edit_segment(pid: str, sid: int, body: Dict[str, Any] = Body(...)):
+    """Edit a sentence (text / pause after it), optionally regenerate it right away;
+    ``take`` picks an earlier take instead."""
+    from subalign.tts import dubbing
+
+    pdir = _dub_dir(pid)
+    try:
+        if body.get("take"):
+            dubbing.use_take(pdir, sid, body["take"])
+            _tts_queue.put((pid, "assemble", None))
+        else:
+            dubbing.edit_segment(pdir, sid, body.get("text"), body.get("pause_after"))
+    except (KeyError, StopIteration):
+        raise HTTPException(404, "sentence / take not found")
+    if body.get("regenerate"):
+        _tts_enqueue(pid, [sid])
+    return _dub_view(pid)
+
+
+@app.post("/api/tts/projects/{pid}/config")
+def tts_config(pid: str, body: Dict[str, Any] = Body(...)):
+    from subalign.tts import dubbing
+
+    dubbing.set_config(_dub_dir(pid), **body)
+    return _dub_view(pid)
+
+
+@app.post("/api/tts/projects/{pid}/assemble")
+def tts_assemble(pid: str):
+    _dub_dir(pid)
+    _tts_queue.put((pid, "assemble", None))
+    _tts_state.setdefault(pid, {"queued": [], "running": None})["running"] = "mix"
+    return _dub_view(pid)
+
+
+@app.post("/api/tts/projects/{pid}/export")
+def tts_export(pid: str, body: Dict[str, Any] = Body({})):
+    from subalign.tts import dubbing
+
+    pdir = _dub_dir(pid)
+    if not (pdir / "mix.wav").exists():
+        raise HTTPException(400, "还没有合成总音频")
+    fmt = body.get("format", "mp3")
+    if fmt not in ("wav", "mp3", "aac", "flac", "opus"):
+        raise HTTPException(400, "unknown format")
+    p = dubbing.export_mix(pdir, fmt, body.get("bitrate", "320k"), int(body.get("bit_depth", 24)),
+                           int(body.get("sample_rate", 48000)), int(body.get("channels", 1)))
+    return {"url": f"/dub/{pid}/{p.name}?v={int(time.time())}", "name": p.name, "size": p.stat().st_size}
+
+
+@app.post("/api/tts/projects/{pid}/to-studio")
+def tts_to_studio(pid: str):
+    """Hand the assembled voice to the voice-over chain (it appears among the recordings)."""
+    from subalign.tts import dubbing
+
+    pdir = _dub_dir(pid)
+    if not (pdir / "mix.wav").exists():
+        raise HTTPException(400, "还没有合成总音频")
+    proj = dubbing.load(pdir)
+    RECORDINGS.mkdir(parents=True, exist_ok=True)
+    stem = "".join(c for c in (proj.get("title") or "AI配音") if c.isalnum() or c in "-_ ").strip()[:30] or "AI配音"
+    dst = RECORDINGS / f"{time.strftime('%Y%m%d-%H%M%S')}-AI-{stem}.wav"
+    shutil.copy(pdir / "mix.wav", dst)
+    return {"name": dst.name}
+
+
+@app.post("/api/tts/worker/{action}")
+def tts_worker_ctl(action: str):
+    from subalign.tts.dubbing import WORKER
+
+    if action == "stop":
+        WORKER.stop()
+    elif action == "start":
+        WORKER.request(cmd="load")
+    else:
+        raise HTTPException(404)
+    return tts_status()
+
+
+@app.get("/dub/{pid}/{rel:path}")
+def dub_file(pid: str, rel: str):
+    base = _dub_dir(pid).resolve()
+    p = (base / rel).resolve()
+    if base not in p.parents or not p.is_file():
+        raise HTTPException(404)
+    return FileResponse(p)
+
+
 # ------------------------------------------------------------------ info / status
 def _have(mod: str) -> bool:
     try:
@@ -968,6 +1233,7 @@ def main() -> None:
     a = ap.parse_args()
     _install_model_cache()
     threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=_tts_worker, daemon=True).start()
     if not a.no_ollama and paths.OLLAMA_EXE.exists():
         threading.Thread(target=ollama.ensure_server, daemon=True).start()
     print(f"subalign 功能测试台: http://{a.host}:{a.port}", flush=True)
