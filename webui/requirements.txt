@@ -25,6 +25,8 @@ jieba>=0.42
 python-docx
 # LLM
 anthropic>=0.60
+# video rough cut (face detection, frame scaling); 4.x still ships the Haar face model
+opencv-python-headless>=4.8,<5
 # web test console
 fastapi
 uvicorn

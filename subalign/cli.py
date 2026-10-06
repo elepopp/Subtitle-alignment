@@ -238,6 +238,34 @@ def cmd_roughcut(a) -> int:
     return 0
 
 
+def cmd_videocut(a) -> int:
+    from .pipeline import PipelineConfig, export_all
+    from .roughcut import RoughCutConfig
+    from .videocut import VideoCutConfig, video_cut
+
+    rcfg = RoughCutConfig(level=a.level, fillers=not a.no_fillers, repeats=not a.no_repeats,
+                          retakes=not a.no_retakes, unrecognized=not a.no_unrecognized, pauses=not a.no_pauses,
+                          max_pause=a.max_pause, keep_pause=a.keep_pause, min_gap=a.min_gap,
+                          crossfade_ms=a.crossfade_ms, extra_fillers=_csv(a.fillers) or (),
+                          keep_words=_csv(a.keep) or (), llm=a.llm)
+    vcfg = VideoCutConfig(min_shot=a.min_shot, max_cuts=a.max_cuts, mute=not a.no_mute, mute_max=a.mute_max,
+                          slide=a.slide, transitions=a.transitions, zoom=a.zoom, fade_frames=a.fade_frames,
+                          content=a.content, crf=a.crf, fcpxml=not a.no_fcpxml)
+    plan = json.loads(Path(a.plan).read_text(encoding="utf-8")) if a.plan else None
+    out = a.out or str(Path(a.video).parent / "output")
+    res = video_cut(Path(a.video), Path(out), rcfg, vcfg, script=_read_script(a.script), plan=plan, language=a.lang,
+                    asr_backend=a.asr, asr_model=a.asr_model, device=a.device, ctc=a.ctc,
+                    llm_client=_llm_cfg(a).client() if a.llm and plan is None else None)
+    files = [str(f) for f in res["files"]]
+    pcfg = PipelineConfig(export=_export_cfg(a))
+    if pcfg.export.formats is None:
+        pcfg.export.formats = ["srt", "json"]
+    if res["document"].lines and pcfg.export.formats:
+        files += [str(f) for f in export_all(res["document"], out, res["base"] + ".vcut", pcfg)]
+    print(json.dumps({"stats": res["stats"], "files": files}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_studio(a) -> int:
     from .studio import StudioConfig, process
 
@@ -364,6 +392,46 @@ def build_parser() -> argparse.ArgumentParser:
     _add_export(s)
     _add_llm(s)
     s.set_defaults(func=cmd_roughcut)
+
+    s = sub.add_parser("videocut", help="video rough cut: speech rough cut with as few, well-placed picture cuts")
+    s.add_argument("video")
+    s.add_argument("--script", help="verbatim transcript (optional; recognised otherwise)")
+    s.add_argument("--plan", help="edited plan (.videocut.json) to render instead of detecting again")
+    g = s.add_argument_group("recognition")
+    g.add_argument("--lang")
+    g.add_argument("--asr", default="auto", help="auto | faster-whisper | whisper | openai | funasr")
+    g.add_argument("--asr-model")
+    g.add_argument("--ctc", default="auto", choices=["auto", "on", "off"], help="CTC (only with --script)")
+    g.add_argument("--device")
+    g = s.add_argument_group("what to cut (as the speech rough cut)")
+    g.add_argument("--level", default="standard", choices=["conservative", "standard", "aggressive"])
+    g.add_argument("--no-fillers", action="store_true")
+    g.add_argument("--no-repeats", action="store_true")
+    g.add_argument("--no-retakes", action="store_true")
+    g.add_argument("--no-unrecognized", action="store_true")
+    g.add_argument("--no-pauses", action="store_true")
+    g.add_argument("--max-pause", type=float)
+    g.add_argument("--keep-pause", type=float)
+    g.add_argument("--min-gap", type=float, default=0.12)
+    g.add_argument("--crossfade-ms", type=float, default=25.0)
+    g.add_argument("--fillers", help="extra filler words, comma separated")
+    g.add_argument("--keep", help="words never cut, comma separated")
+    g.add_argument("--llm", action="store_true", help="let the LLM mark redundant phrases (废话)")
+    g = s.add_argument_group("picture")
+    g.add_argument("--min-shot", type=float, default=1.5, help="shortest picture segment between two cuts (s)")
+    g.add_argument("--max-cuts", type=int, default=3, help="at most this many picture cuts in any 10 s")
+    g.add_argument("--no-mute", action="store_true", help="never silence a filler instead of cutting it")
+    g.add_argument("--mute-max", type=float, default=0.45, help="longest filler that may be silenced (s)")
+    g.add_argument("--slide", type=float, default=0.25, help="how far a picture cut may move inside a pause (s)")
+    g.add_argument("--transitions", default="auto", choices=["auto", "cut", "fade", "zoom"])
+    g.add_argument("--zoom", type=float, default=1.12, help="punch-in scale")
+    g.add_argument("--fade-frames", type=int, default=4)
+    g.add_argument("--content", default="auto", choices=["auto", "talking", "screen"])
+    g.add_argument("--crf", type=int, default=20)
+    g.add_argument("--no-fcpxml", action="store_true")
+    _add_export(s)
+    _add_llm(s)
+    s.set_defaults(func=cmd_videocut)
 
     s = sub.add_parser("studio", help="voice-over processing: cleanup, repair, EQ, dynamics, BGM, loudness, export")
     s.add_argument("audio")
