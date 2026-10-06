@@ -241,3 +241,59 @@ def test_budget_capped_by_time_for_fast_speakers():
     assert slow["target"]["by"] == "ratio" and slow["target"]["syllables"] == round(23 * 6.19 / 5.18)
     untimed = iso.analyze({"id": 1, "text": text, "start": None, "end": None, "times": []}, cfg, [])
     assert untimed["target"]["by"] == "ratio"
+
+
+# ------------------------------------------------------------------ re-segmentation of subtitles
+def _cues(*cues):
+    from subalign.text.tokenize import make_line
+
+    return Document(lines=[make_line(t, start=a, end=b) for a, b, t in cues])
+
+
+def test_resegment_joins_cues_cut_mid_sentence():
+    doc = _cues((0.0, 2.9, "Now, since Opus 5.5 has been released,"), (2.9, 5.2, "people have been generating insane"),
+                (5.2, 7.7, "videos with this model. We have product"), (7.7, 9.0, "launch videos like this one."))
+    ss = iso.resegment(doc, "en")
+    assert [s["text"] for s in ss] == ["Now, since Opus 5.5 has been released, people have been generating insane videos with this model.",
+                                       "We have product launch videos like this one."]
+    assert ss[0]["start"] == 0.0 and 5.2 < ss[0]["end"] < 7.7 and ss[1]["end"] == 9.0
+    # word times come from the cues: "people" starts where its cue starts
+    k = ss[0]["text"].index("people")
+    assert dict((o, t) for o, t in ss[0]["times"])[k] == pytest.approx(2.9)
+
+
+def test_resegment_drops_rolling_caption_repeats_and_breaks_at_silence():
+    doc = _cues((0.0, 2.0, "this is the first part of"), (2.0, 4.0, "the first part of a sentence."),
+                (4.0, 6.0, "And then something else"), (9.0, 10.0, "after a long pause."))
+    ss = iso.resegment(doc, "en")
+    assert ss[0]["text"] == "this is the first part of a sentence."
+    assert [s["text"] for s in ss[1:]] == ["And then something else", "after a long pause."]
+
+
+def test_resegment_splits_overlong_sentences_at_a_clause():
+    doc = _cues((0.0, 10.0, " ".join(f"a{i}" for i in range(20)) + ","), (10.0, 20.0, " ".join(f"b{i}" for i in range(20)) + "."))
+    ss = iso.resegment(doc, "en", max_seconds=15.0)
+    assert len(ss) == 2 and ss[0]["text"].endswith(",") and ss[1]["start"] == pytest.approx(10.0)
+
+
+def test_resegment_without_punctuation_asks_the_llm():
+    class Punct(LLMClient):
+        def complete(self, system, user, schema=None):
+            assert "never add, remove" in system
+            words = user.split()
+            return json.dumps({"sentences": [" ".join(words[:5]).capitalize() + ".", " ".join(words[5:]).capitalize() + "?"]})
+    doc = _cues((0.0, 2.0, "so today we talk about"), (2.0, 4.0, "fonts do you like them"))
+    ss = iso.resegment(doc, "en", Punct())
+    assert [s["text"] for s in ss] == ["So today we talk about.", "Fonts do you like them?"]
+    assert ss[1]["start"] == pytest.approx(2.0) and ss[1]["times"][0] == [0, 2.0]
+
+    class Broken(LLMClient):
+        def complete(self, system, user, schema=None):
+            return "no"
+    doc = _cues((0.0, 2.0, "so today we talk about"), (2.6, 4.0, "fonts do you like them"))
+    assert [s["text"] for s in iso.resegment(doc, "en", Broken())] == ["so today we talk about", "fonts do you like them"]
+
+
+def test_resegment_chinese():
+    doc = _cues((0.0, 2.0, "大家好今天我们"), (2.0, 4.0, "聊一聊新手机。这款手机"), (4.0, 6.0, "很贵。"))
+    assert [s["text"] for s in iso.resegment(doc, "zh")] == ["大家好今天我们聊一聊新手机。", "这款手机很贵。"]

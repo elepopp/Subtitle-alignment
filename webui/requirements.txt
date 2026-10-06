@@ -27,6 +27,8 @@ python-docx
 anthropic>=0.60
 # video rough cut (face detection, frame scaling); 4.x still ships the Haar face model
 opencv-python-headless>=4.8,<5
+# subtitle font library (names, coverage)
+fonttools>=4.40
 # web test console
 fastapi
 uvicorn

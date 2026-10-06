@@ -163,3 +163,28 @@ def test_assemble(tmp_path):
     assert dubbing.load(pdir)["mix"]["duration"] == pytest.approx(len(y) / SR, abs=0.02)
     p = dubbing.export_mix(pdir, "mp3")
     assert p.exists() and p.suffix == ".mp3"
+
+
+def test_worker_restarts_after_a_cuda_error():
+    class Fake(dubbing.TTSWorker):
+        def __init__(self):
+            super().__init__()
+            self.calls, self.killed = [], 0
+
+        def _request(self, req):
+            self.calls.append(req)
+            if len(self.calls) == 1:
+                raise RuntimeError("AcceleratorError: CUDA error: unknown error")
+            return {"ok": True, "out": "x.wav"}
+
+        def _kill(self):
+            self.killed += 1
+
+    w = Fake()
+    assert w.request(cmd="synth", text="你好")["ok"] and w.killed == 1 and len(w.calls) == 2
+
+    class Other(Fake):
+        def _request(self, req):
+            raise RuntimeError("text too long")
+    with pytest.raises(RuntimeError, match="too long"):
+        Other().request(cmd="synth", text="x")

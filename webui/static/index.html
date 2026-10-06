@@ -233,6 +233,29 @@ details.sec[open]>summary.sec-title{margin-bottom:12px}
 .dub-row .qa{font-size:11.5px;color:var(--muted);padding:3px 2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dub-row .ops{display:flex;gap:4px;align-items:center;flex-wrap:wrap}
 .dub-row .src{font-size:11.5px;color:var(--faint);padding:2px 2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* ---------- font picker (every font shown as a sample of itself) */
+.fp{position:relative}
+.fp-btn{width:100%;display:flex;align-items:center;gap:8px;padding:5px 10px;min-height:38px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);cursor:pointer;font:inherit;color:var(--text);text-align:left}
+.fp-btn:hover{border-color:var(--accent-line)}
+.fp-btn .fp-img{height:22px;max-width:62%;object-fit:contain;object-position:left center}
+.fp-btn .fp-name{flex:1;min-width:0;font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
+.fp-list{position:absolute;z-index:60;left:0;top:calc(100% + 4px);width:max(100%,360px);max-height:380px;overflow:auto;background:var(--surface);border:1px solid var(--line-strong);border-radius:10px;box-shadow:0 8px 24px rgba(16,24,40,.16);padding:4px}
+.fp-row{padding:6px 9px;border-radius:7px;cursor:pointer}
+.fp-row:hover{background:var(--surface-2)}
+.fp-row.on{background:var(--accent-weak)}
+.fp-row img{height:28px;max-width:100%;display:block;object-fit:contain;object-position:left center}
+.fp-row .fp-cap{font-size:11px;color:var(--muted);margin-top:2px}
+.fp-row .fp-txt{font-size:15px}
+@media (prefers-color-scheme: dark){.fp-btn .fp-img,.fp-row img{filter:invert(1)}}
+/* ---------- translation progress */
+.dt-prog{margin-top:10px}
+.dt-steps{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.dt-steps span{font-size:12px;padding:2px 9px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+.dt-steps span.done{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,transparent)}
+.dt-steps span.cur{color:var(--accent);border-color:var(--accent-line);background:var(--accent-weak);font-weight:600}
+.dt-bar2{height:8px;border-radius:99px;background:var(--surface-3);overflow:hidden}
+.dt-bar2 i{display:block;height:100%;background:var(--accent);border-radius:99px;transition:width .4s}
+.dt-prog .row{font-size:12.5px;color:var(--muted);margin-top:6px}
 /* ---------- audio translation */
 .dt-list{display:flex;flex-direction:column;gap:10px}
 .dt-row{border:1px solid var(--line);border-radius:var(--r);padding:10px 12px;background:var(--surface)}
@@ -668,7 +691,7 @@ const PAGES = {
   roughcut: { nav: "语音粗剪", icon: "scissors" }, videocut: { nav: "视频粗剪", icon: "video" }, studio: { nav: "音频处理", icon: "sliders" },
   recorder: { nav: "录音棚", icon: "record", render: m => renderRecorder(m) },
   dubbing: { nav: "AI 配音", icon: "voice", render: m => renderDubbing(m) },
-  dubtrans: { nav: "音频翻译", icon: "translate", render: m => renderDubTrans(m) },
+  dubtrans: { nav: "音视频翻译", icon: "translate", render: m => renderDubTrans(m) },
   convert: { nav: "格式转换", icon: "convert" }, translate: { nav: "字幕翻译", icon: "translate" }, proofread: { nav: "字幕校对", icon: "check" },
   formats: { nav: "格式与样式", icon: "book", render: renderFormats },
   jobs: { nav: "任务记录", icon: "history", render: renderJobs },
@@ -1368,7 +1391,46 @@ function karaokeCard(doc, j, audios, name) {
 // ---------------------------------------------------------------- ASS effect preview (libass / SubtitlesOctopus)
 let OCTO = null;
 const VIDEO_EXT = /\.(mp4|mkv|mov|webm|m4v|avi|flv|ts)$/i;
-function assPreviewCard(assFiles, j, audios) {
+// a font chooser that always lists every font, each as a picture of its own sample text
+function fontPicker(onPick, allowCustom = true) {
+  let fonts = [], value = "";
+  const img = h("img", { class: "fp-img", alt: "" });
+  const name = h("span", { class: "fp-name" });
+  const btn = h("button", { type: "button", class: "fp-btn" }, img, name, ico("chev"));
+  const list = h("div", { class: "fp-list", style: "display:none" });
+  const wrap = h("div", { class: "fp" }, btn, list);
+  const find = v => fonts.find(f => f.names.some(n => n.toLowerCase() === String(v || "").toLowerCase()));
+  const close = () => { list.style.display = "none"; };
+  function show() {
+    const f = find(value);
+    name.textContent = f ? (f.display || f.names[0])
+      : !value ? "未选择" : (!allowCustom && fonts.length ? `${value}（不在可商用字体库，压制时自动替换）` : value);
+    if (f && f.preview) { img.src = f.preview; img.style.display = ""; } else { img.removeAttribute("src"); img.style.display = "none"; }
+  }
+  function build() {
+    list.innerHTML = "";
+    const cur = find(value);
+    for (const f of fonts) {
+      const meta = [f.display && f.display !== f.names[0] ? f.names[0] : "", (f.scripts || []).join("/"), f.license || "", f.verified === false ? "授权待核实" : ""].filter(Boolean).join(" · ");
+      list.append(h("div", { class: "fp-row" + (f === cur ? " on" : ""), title: f.note || "", onclick: () => { value = f.names[0]; show(); close(); onPick(value); } },
+        f.preview ? h("img", { src: f.preview, loading: "lazy", alt: f.display || f.names[0] }) : h("div", { class: "fp-txt" }, f.names[0]),
+        h("div", { class: "fp-cap" }, (f.display || f.names[0]) + (meta ? " · " + meta : ""))));
+    }
+    if (allowCustom) list.append(h("div", { class: "fp-row", onclick: () => {
+      const v = prompt("字体名称（本机已安装的字体）", value || ""); close();
+      if (v && v.trim()) { value = v.trim(); show(); onPick(value); }
+    } }, h("div", { class: "fp-txt" }, "其他字体…"), h("div", { class: "fp-cap" }, "手动输入字体名")));
+  }
+  btn.addEventListener("click", () => {
+    const open = list.style.display === "none";
+    if (open) { build(); list.style.display = ""; const on = list.querySelector(".on"); if (on) on.scrollIntoView({ block: "nearest" }); } else close();
+  });
+  document.addEventListener("click", e => { if (!wrap.contains(e.target)) close(); });
+  return { el: wrap, setFonts(fl) { fonts = fl; show(); }, load(v) { value = v || ""; show(); } };
+}
+
+function assPreviewCard(assFiles, j, audios, api = {}) {
+  const styleUrl = api.styleUrl || `/api/jobs/${j.id}/style`;
   const card = h("div", { class: "card" });
   const media = j.meta?.media;
   const isVideo = !!media && VIDEO_EXT.test(media);
@@ -1422,7 +1484,7 @@ function assPreviewCard(assFiles, j, audios) {
     if (OCTO) { try { OCTO.dispose(); } catch (e) {} OCTO = null; }
     OCTO = new SubtitlesOctopus({
       canvas, subContent: text, workerUrl: "/static/vendor/octopus/subtitles-octopus-worker.js",
-      fallbackFont: "/fonts/cjk", availableFonts: fontMap, targetFps: 30,
+      fallbackFont: api.fallbackFont || "/fonts/cjk", availableFonts: fontMap, targetFps: 30,
       onReady: () => { fit(); sync(); },
       onError: e => { status.textContent = "渲染失败：" + e; },
     });
@@ -1449,13 +1511,13 @@ function assPreviewCard(assFiles, j, audios) {
   async function render(save = false) {
     const my = ++seq;
     status.textContent = save ? "保存中…" : "生成中…";
-    const r = await fetch(`/api/jobs/${j.id}/style`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ spec, target: sel.value, save }) });
+    const r = await fetch(styleUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ spec, target: sel.value, save }) });
     const d = await r.json();
     if (my !== seq && !save) return;            // a newer edit is already on its way
     if (!r.ok) { status.textContent = "失败：" + (d.detail || r.status); return; }
     show(d.ass);
     status.textContent = `${res[0]}×${res[1]}`;
-    if (save) { saved = JSON.stringify(spec); markDirty(); msg.textContent = `✓ 已重新生成 ${d.written.length} 个 .ass：${d.written.join("、")}（上方下载即为新效果）`; }
+    if (save) { saved = JSON.stringify(spec); markDirty(); msg.textContent = api.savedMsg || `✓ 已重新生成 ${d.written.length} 个 .ass：${d.written.join("、")}（上方下载即为新效果）`; }
   }
   const changed = () => { markDirty(); msg.textContent = ""; clearTimeout(timer); timer = setTimeout(() => render(false), 250); };
 
@@ -1488,10 +1550,10 @@ function assPreviewCard(assFiles, j, audios) {
     ctl[path] = { el: e, load: v => { e.checked = v === on; } };
     return h("label", { class: "check" }, e, label);
   };
-  const fontInput = h("input", { type: "text", list: "font-dl-" + j.id, placeholder: "字体名称" });
-  fontInput.addEventListener("change", () => { set("main.fontname", fontInput.value.trim() || "Noto Sans CJK SC"); changed(); });
-  ctl["main.fontname"] = { el: fontInput, load: v => { fontInput.value = v || ""; } };
-  const fontDl = h("datalist", { id: "font-dl-" + j.id });
+  const fontPick = fontPicker(v => { set("main.fontname", v); changed(); }, !api.fontsUrl);
+  ctl["main.fontname"] = { el: fontPick.el, load: v => fontPick.load(v) };
+  const font2Pick = fontPicker(v => { set("translation.fontname", v); changed(); }, !api.fontsUrl);
+  ctl["translation.fontname"] = { el: font2Pick.el, load: v => font2Pick.load(v) };
   const fsInput = h("input", { type: "number", min: 12, max: 200, step: 1, placeholder: "按画面布局" });
   fsInput.addEventListener("input", () => { spec.font_size = fsInput.value ? parseInt(fsInput.value, 10) : null; changed(); });
   ctl["font_size"] = { el: fsInput, load: v => { fsInput.value = v ?? ""; } };
@@ -1512,14 +1574,15 @@ function assPreviewCard(assFiles, j, audios) {
     grid(field("已唱 / 主颜色", colorC("main.primary")), field("未唱颜色", colorC("main.secondary")),
       field("描边颜色", colorC("main.outline_color")), field("阴影 / 底框颜色", colorC("main.back_color")),
       field("辉光颜色", colorC("effect.glow_color")), field("译文颜色", colorC("translation.primary"))),
-    grid(field("字体", h("span", {}, fontInput, fontDl), "列表里是本机字体（预览可见）"), field("字号 px", fsInput, "留空 = 画面布局默认"),
+    grid(field("字体", fontPick.el, api.fontHint || "列表里是本机字体（预览可见）"), field("第二行（译文 / 原文）字体", font2Pick.el),
+      field("字号 px", fsInput, "留空 = 画面布局默认"),
       field("描边粗细", rangeC("main.outline", 0, 12, 0.5)), field("阴影距离", rangeC("main.shadow", 0, 8, 0.5)),
       h("div", { class: "field", style: "justify-content:flex-end;gap:6px" }, checkC("main.bold", "粗体"), checkC("main.italic", "斜体"), checkC("main.border_style", "半透明底框", 3, 1))),
     grid(field("淡入 ms", numC("effect.fade_in_ms", 0, 2000, 10)), field("淡出 ms", numC("effect.fade_out_ms", 0, 2000, 10)),
       field("提前显示 ms", numC("effect.lead_in_ms", 0, 3000, 50)), field("延后消失 ms", numC("effect.lead_out_ms", 0, 3000, 50)),
       field("弹出放大 %", numC("effect.pop_scale", 100, 200, 1)), field("辉光模糊", rangeC("effect.glow_blur", 0, 20, 0.5))),
   );
-  const saveBtn = h("button", { class: "btn primary", type: "button", onclick: async () => { saveBtn.disabled = true; try { await render(true); } finally { saveBtn.disabled = false; } } }, "保存并重新生成特效字幕");
+  const saveBtn = h("button", { class: "btn primary", type: "button", onclick: async () => { saveBtn.disabled = true; try { await render(true); } finally { saveBtn.disabled = false; } } }, api.saveLabel || "保存并重新生成特效字幕");
   const resetBtn = h("button", { class: "btn small", type: "button", onclick: () => { spec = JSON.parse(saved); loadControls(); markDirty(); render(false); } }, "撤销未保存的修改");
   const copyBtn = h("button", { class: "btn small", type: "button", title: "可粘贴到任务表单的「自定义样式 JSON」", onclick: async () => {
     const { font_size, ...st } = spec;
@@ -1534,8 +1597,9 @@ function assPreviewCard(assFiles, j, audios) {
   }
 
   (async () => {
-    const [st, fl] = await Promise.all([fetch(`/api/jobs/${j.id}/style`).then(r => r.json()), fetch("/api/fonts").then(r => r.json()).catch(() => [])]);
-    for (const f of fl) for (const n of f.names) { fontMap[n.toLowerCase()] = f.url; fontDl.append(h("option", { value: n })); }
+    const [st, fl] = await Promise.all([fetch(styleUrl).then(r => r.json()), fetch(api.fontsUrl || "/api/fonts").then(r => r.json()).catch(() => [])]);
+    for (const f of fl) for (const n of f.names) fontMap[n.toLowerCase()] = f.url;
+    fontPick.setFonts(fl); font2Pick.setFonts(fl);
     presets = st.presets || [];
     presets.forEach(p => presetSel.append(h("option", { value: p }, p)));
     const editable = new Set((st.targets || []).map(t => t.ass));
@@ -2334,7 +2398,9 @@ async function renderDubProject(m, pid) {
           store.set("form.studio", { ...AI_STUDIO, _preset: "AI 配音" });
           sessionStorage.setItem("studio.recording", r.name); go("studio");
         } catch (e) { alert(e.message); }
-      } }, ico("sliders"), "送去音频处理（BGM / 响度 / 导出）")));
+      } }, ico("sliders"), "送去音频处理（BGM / 响度 / 导出）"),
+      P.source?.dubtrans ? h("button", { class: "btn", type: "button", title: "去掉原视频人声、保留背景，混入这段配音，压字幕，导出视频",
+        onclick: () => { store.set("dt.project", P.source.dubtrans); go("dubtrans"); } }, ico("video"), "生成翻译视频") : null));
   m.append(mixCard);
 
   // ---- references + settings
@@ -2459,7 +2525,8 @@ async function renderDubProject(m, pid) {
 // ---------------------------------------------------------------- 音频翻译 (dubbing translation)
 const DT_LANGS = [["zh", "中文"], ["en", "英语"], ["ja", "日语"], ["ko", "韩语"], ["fr", "法语"], ["de", "德语"], ["es", "西班牙语"], ["pt", "葡萄牙语"], ["it", "意大利语"], ["ru", "俄语"], ["vi", "越南语"]];
 const DT_TTS = new Set(["zh", "en", "ja", "es"]);          // languages IndexTTS-2.5 can speak
-const DT_STAGE = { start: "准备中", transcribe: "语音识别中", anchors: "标注名词 / 数字位置", translate: "生成候选译文", judge: "大模型评选最自然的版本", done: "完成" };
+const DT_STAGE = { start: "准备中", transcribe: "语音识别中", segment: "按完整句子重新分句", anchors: "标注名词 / 数字位置", translate: "生成候选译文", judge: "大模型评选最自然的版本", done: "完成" };
+const DT_STEP = { segment: "重新分句", anchors: "标注名词", translate: "翻译", refine1: "修正 1", refine2: "修正 2", refine3: "修正 3", judge: "评选" };
 const dtStage = s => s && s.startsWith("refine") ? `第 ${s.slice(6)} 轮修正（长度 / 语序未达标的句子）` : (DT_STAGE[s] || s || "");
 const llmBody = () => ({ provider: LLM.provider, model: LLM.model, base_url: LLM.base_url, api_key: LLM.api_key });
 const pct = x => Math.round(x * 100) + "%";
@@ -2479,7 +2546,7 @@ async function renderDtSetup(m) {
   const saveSt = () => store.set("dt.cfg", st);
   const pre = sessionStorage.getItem("dt.text");            // handed over from the AI 配音 page
   if (pre != null) { st.source = "text"; sessionStorage.removeItem("dt.text"); }
-  m.append(pageHead("音频翻译", "录音 / 视频 → 语音识别 → 翻译：译文音节数贴合原句时长，名词出现在原句相同的位置（多个候选自动打分、可再修正）→ 用原说话人的音色 AI 配音，对齐原视频时间轴。也可以直接翻译字幕或文稿。", "配音翻译"));
+  m.append(pageHead("音视频翻译", "录音 / 视频 → 语音识别 → 翻译：译文音节数贴合原句时长，名词出现在原句相同的位置（多个候选自动打分、可再修正）→ 用原说话人的音色 AI 配音，对齐原视频时间轴 → 视频：去掉原人声、保留背景声，混入配音，可压字幕，导出原规格或指定规格。也可以直接翻译字幕或文稿。", "配音翻译"));
   const ws = h("div", { class: "workspace", style: "grid-template-columns:minmax(0,1fr) minmax(340px,420px)" });
   m.append(ws);
 
@@ -2487,6 +2554,7 @@ async function renderDtSetup(m) {
   const seg = h("div", { class: "seg" });
   const panes = {};
   const A = refPicker("上传录音 / 视频", "mp3 / wav / m4a / mp4 / mov … 先语音识别出文稿和每个字的时间");
+  const TV = refPicker("选择视频 / 音频", "mp4 / mov / mkv / mp3 / wav …");
   const asrSel = h("select", { onchange: e => { st.asr_model = e.target.value; saveSt(); } },
     [["large-v3-turbo", "large-v3-turbo（快，推荐）"], ["large-v3", "large-v3（更准，较慢）"], ["", "后端默认"]].map(([v, l]) => h("option", { value: v, selected: v === st.asr_model }, l)));
   panes.media = h("div", {}, A.el, h("div", { class: "field", style: "margin-top:10px" }, h("label", {}, "识别模型"), asrSel,
@@ -2506,9 +2574,11 @@ async function renderDtSetup(m) {
     if (/\.(srt|vtt|ass|ssa|lrc|json|sbv|ttml)$/i.test(f.name)) mergeBox.style.display = "";
   } });
   const sniff = () => { if (/^\s*\d+\s*\n\s*\d\d:\d\d:\d\d[,.]\d+\s*-->/.test(ta.value) && textName === "script.txt") textName = "pasted.srt"; };
-  const mergeBox = dubCheck(st, "merge", "把被切断的半句字幕合并成整句再翻译", () => saveSt());
+  const mergeBox = dubCheck(st, "merge", "按完整句子重新分句（推荐）：字幕只作时间参考，拆开的半句、滚动字幕的重复合并成整句再翻译", () => saveSt());
   panes.text = h("div", {}, h("div", { class: "toolbar" }, h("button", { class: "btn small", type: "button", onclick: () => tfi.click() }, ico("upload"), "上传字幕 / 文稿"), nameEl, tfi), ta,
-    h("div", { class: "hint", style: "margin-top:6px" }, "字幕保留原时间轴（配音会对齐到原时间）；纯文本按句翻译，时长按语速估算。"), mergeBox);
+    h("div", { class: "hint", style: "margin-top:6px" }, "字幕保留原时间轴（配音会对齐到原时间）；纯文本按句翻译，时长按语速估算。"), mergeBox,
+    h("div", { class: "field", style: "margin-top:12px" }, h("label", {}, "对应的视频 / 音频（可选）"), TV.el,
+      h("div", { class: "hint" }, "字幕所属的原视频：用来克隆原说话人的声音、生成翻译视频（去人声留背景、压字幕）。字幕时间要和它一致。")));
   const show = k => { st.source = k; saveSt(); seg.querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.k === k)); for (const [kk, el] of Object.entries(panes)) el.style.display = kk === k ? "" : "none"; };
   [["media", "upload", "录音 / 视频（自动识别）"], ["job", "history", "已有对齐结果"], ["text", "file", "字幕 / 文稿"]].forEach(([k, i, l]) =>
     seg.append(h("button", { "data-k": k, type: "button", onclick: () => show(k) }, ico(i), l)));
@@ -2534,7 +2604,12 @@ async function renderDtSetup(m) {
     fd.append("source", st.source);
     if (st.source === "media") { const a = A.get(); if (!a.file && !a.rec) return alert("请上传录音 / 视频，或选择录音棚里的录音"); if (a.file) fd.append("media", a.file); else fd.append("recording", a.rec); fd.append("asr_model", st.asr_model); }
     else if (st.source === "job") { if (!jobSel.value) return alert("请选择一个语音对齐任务"); fd.append("job", jobSel.value); }
-    else { if (!ta.value.trim()) return alert("请粘贴或上传字幕 / 文稿"); sniff(); fd.append("text_content", ta.value); fd.append("text_name", textName); }
+    else {
+      if (!ta.value.trim()) return alert("请粘贴或上传字幕 / 文稿");
+      sniff(); fd.append("text_content", ta.value); fd.append("text_name", textName);
+      const v = TV.get();
+      if (v.file) fd.append("media", v.file); else if (v.rec) fd.append("recording", v.rec);
+    }
     const glossary = Object.fromEntries(st.glossary.split("\n").map(l => l.split(/[=＝]/)).filter(p => p.length >= 2 && p[0].trim() && p[1].trim()).map(p => [p[0].trim(), p.slice(1).join("=").trim()]));
     fd.append("src_lang", st.src); fd.append("tgt_lang", st.tgt); fd.append("merge", st.merge ? "true" : "false");
     fd.append("config", JSON.stringify({ candidates: +st.candidates, rounds: +st.rounds, tolerance: +st.tolerance, judge: !!st.judge, instructions: st.instructions, glossary }));
@@ -2592,6 +2667,7 @@ function candMeta(s, c) {
   }
   if (c.judge != null) out.append(h("span", { title: "大模型评分：忠实 + 自然" }, `自然度 ${c.judge}/10`));
   if (c.custom) out.append(h("span", {}, "手动修改"));
+  if (c.over_budget) out.append(h("span", { class: "bad", title: "所有候选都超出长度预算，保留了最接近的一个；可以写提示后再生成，或手动改短" }, "超长（候选都不达标）"));
   return out;
 }
 
@@ -2617,12 +2693,17 @@ async function renderDtProject(m, pid) {
 
   // ---- status / actions
   const prog = h("span", { class: "badge" }), stage = h("span", { class: "muted", style: "font-size:12.5px" });
+  const steps = h("div", { class: "dt-steps" }), bar = h("i", { style: "width:0" }), progInfo = h("span");
+  const stopBtn = h("button", { class: "btn small", type: "button", title: "做完当前这一批就停下，已经翻译的都保留；之后可以点「修正未达标的句子」继续",
+    onclick: () => act(base + "/stop") }, "停止（保留已有结果）");
+  const progBox = h("div", { class: "dt-prog", style: "display:none" }, steps, h("div", { class: "dt-bar2" }, bar),
+    h("div", { class: "row" }, progInfo, h("span", { class: "sp", style: "flex:1" }), stopBtn));
   const errEl = h("div");
   const tolSel = h("select", { style: "width:auto", onchange: e => act(base + "/config", { tolerance: +e.target.value }) },
     [[0.05, "±5%"], [0.1, "±10%"], [0.15, "±15%"], [0.2, "±20%"]].map(([v, l]) => h("option", { value: v, selected: Math.abs(v - C.tolerance) < 1e-6 }, "音节偏差 " + l)));
   const media = P.media_url ? h("audio", { controls: true, src: P.media_url, style: "margin-top:8px" }) : null;
   const statusCard = h("div", { class: "card" },
-    h("h3", {}, ico("translate"), "翻译", prog, stage), errEl, media,
+    h("h3", {}, ico("translate"), "翻译", prog, stage), progBox, errEl, media,
     h("div", { class: "row", style: "margin-top:10px" },
       h("button", { class: "btn", type: "button", title: "只给没达标（长度或名词位置）的句子再生成候选", onclick: () => {
         const ids = P.sentences.filter(s => !dtOk(s)).map(s => s.id);
@@ -2702,6 +2783,23 @@ async function renderDtProject(m, pid) {
     errEl.innerHTML = "";
     if (P.error) errEl.append(h("div", { class: "note" }, "出错：" + P.error));
     dubBtn.disabled = P.busy || !done;
+    // stages, bar, numbers, time
+    const pg = P.progress || {};
+    progBox.style.display = P.busy ? "" : "none";
+    if (P.busy) {
+      const plan = pg.plan && pg.plan.length ? pg.plan : [P.stage];
+      const ci = plan.indexOf(P.stage);
+      steps.innerHTML = "";
+      plan.forEach((k, i) => steps.append(h("span", { class: i < ci ? "done" : i === ci ? "cur" : "" }, (i < ci ? "✓ " : "") + (DT_STEP[k] || dtStage(k)))));
+      const frac = P.total ? P.done / P.total : 0;
+      bar.style.width = Math.round(frac * 100) + "%";
+      const fmtS = x => x == null ? "" : x >= 60 ? `${Math.floor(x / 60)} 分 ${Math.round(x % 60)} 秒` : `${Math.round(x)} 秒`;
+      const eta = P.done && P.total && pg.stage_elapsed ? pg.stage_elapsed / P.done * (P.total - P.done) : null;
+      progInfo.textContent = `${dtStage(P.stage)}${P.total ? `：${P.done} / ${P.total}${P.stage && P.stage.startsWith("refine") ? " 句未达标的在重写" : ""}` : ""}` +
+        ` · 已用 ${fmtS(pg.elapsed)}` + (eta != null && P.done < P.total ? ` · 这一步约剩 ${fmtS(eta)}` : "") +
+        ` · 已翻译 ${done} / ${n} 句，达标 ${ok} 句` + (pg.stopping ? " · 正在停止…" : "");
+      stopBtn.disabled = !!pg.stopping;
+    }
   }
 
   // ---- to AI voice-over
@@ -2737,11 +2835,166 @@ async function renderDtProject(m, pid) {
     (P.dubbing || []).length ? h("div", { class: "hint", style: "margin-top:8px" }, "已创建的配音：", P.dubbing.map(id => h("a", { href: "#", style: "margin-left:8px", onclick: e => { e.preventDefault(); store.set("dub.project", id); go("dubbing"); } }, id))) : null,
     h("div", { class: "row", style: "margin-top:12px" }, dubBtn, dubMsg)));
 
+  // a subtitle / script project without its video: attach it (original voice + translated video)
+  if (!P.media_url && P.source?.kind !== "media" && !P.source?.job) {
+    const V = refPicker("选择这份字幕对应的视频 / 音频", "字幕时间要和它一致");
+    const msgA = h("span", { class: "hint" });
+    const attach = h("button", { class: "btn primary", type: "button", onclick: async () => {
+      const v = V.get();
+      if (!v.file && !v.rec) return alert("请选择视频或音频");
+      const fd = new FormData();
+      if (v.file) fd.append("media", v.file); else fd.append("recording", v.rec);
+      attach.disabled = true; msgA.textContent = "上传中…";
+      try { await api(base + "/media", fd); go("dubtrans"); }
+      catch (e) { msgA.textContent = ""; alert(e.message); attach.disabled = false; }
+    } }, ico("upload"), "关联视频");
+    m.append(h("div", { class: "card" }, h("h3", {}, ico("video"), "关联原视频 / 音频",
+      h("span", { class: "muted", style: "font-weight:400;font-size:12px" }, "关联后可以用原说话人的声音配音，并生成翻译视频（去人声留背景、压字幕）")),
+      V.el, h("div", { class: "row", style: "margin-top:10px" }, attach, msgA)));
+  }
+  const videoCard = h("div");
+  m.append(videoCard);
+  const vupd = dtVideoCard(videoCard, pid, () => P, x => { P = x; });
+
   update();
   const timer = setInterval(async () => {
-    try { const was = P.busy; P = await api(base, undefined, "GET"); update(was && !P.busy); } catch (e) {}
+    try { const was = P.busy; P = await api(base, undefined, "GET"); update(was && !P.busy); vupd(); } catch (e) {}
   }, 1500);
   window.__pageCleanup = () => { clearInterval(timer); player.pause(); };
+}
+
+// ---------------------------------------------------------------- 视频翻译: background + dub + subtitles -> video
+const DV_STAGE = { queued: "排队中", start: "准备中", separate: "分离人声 / 背景声", mix: "混音", encode: "压制视频", done: "完成" };
+function dtVideoCard(box, pid, getP, setP) {
+  const base = "/api/dubtrans/projects/" + pid;
+  const st = Object.assign({ dub: "", separation: "auto", bg_gain_db: 0, duck: false, subtitles: "burn", bilingual: false,
+    mode: "keep", height: "", fps: "", codec: "h264", quality: "high", container: "mp4", extend: true }, store.get("dv.cfg", {}));
+  const saveSt = () => store.set("dv.cfg", st);
+  let built = false, listEl = null, styleBox = null, dubSel = null, startBtn = null, sig = "";
+
+  function selectEl(key, opts, onchange) {
+    return h("select", { onchange: e => { st[key] = e.target.value; saveSt(); onchange && onchange(); } },
+      opts.map(([v, l]) => h("option", { value: v, selected: String(st[key]) === String(v) }, l)));
+  }
+  const field = (label, el, hint) => h("div", { class: "field" }, h("label", {}, label), el, hint ? h("div", { class: "hint" }, hint) : null);
+
+  function buildStyle() {
+    if (!styleBox) return;
+    styleBox.innerHTML = "";
+    if (st.subtitles === "none") { styleBox.append(h("p", { class: "muted", style: "font-size:12.5px" }, "不加字幕。")); return; }
+    const P = getP();
+    const q = `?dub=${encodeURIComponent(st.dub || "")}&bilingual=${st.bilingual ? "true" : "false"}`;
+    styleBox.append(assPreviewCard([{ name: "字幕预览（译文按配音实际说话的时间）", url: `${base}/preview.ass${q}` }],
+      { id: "dt-" + pid, meta: { media: P.media_url } }, [],
+      { styleUrl: `${base}/style${q}`, saveLabel: "保存字幕样式（用于压制）", savedMsg: "✓ 已保存，下一次生成视频使用这个样式",
+        fontsUrl: "/api/fonts/free", fallbackFont: "/fonts/free/fallback",
+        fontHint: "只列出可免费商用的字体（fonts/free）；缺字时压制会自动换成覆盖全部文字的可商用字体，预览同步显示" }));
+  }
+
+  function build() {
+    const P = getP();
+    built = true;
+    box.innerHTML = "";
+    const vi = P.video_info || {};
+    const dubs = (P.dub_info || []).filter(d => d.mix);
+    if (!dubs.find(d => d.id === st.dub)) st.dub = dubs.length ? dubs[dubs.length - 1].id : "";
+    dubSel = h("select", { onchange: e => { st.dub = e.target.value; saveSt(); buildStyle(); } },
+      dubs.length ? dubs.map(d => h("option", { value: d.id, selected: d.id === st.dub }, `${d.title || d.id} · ${d.done}/${d.n} 句${d.timeline ? "" : " · 未对齐时间轴"}`))
+        : h("option", { value: "" }, "—— 还没有合成完成的配音 ——"));
+    const gain = h("b", { style: "font:600 12px var(--mono);color:var(--accent)" }, (st.bg_gain_db > 0 ? "+" : "") + st.bg_gain_db + " dB");
+    const gainR = h("input", { type: "range", min: -12, max: 12, step: 1, value: st.bg_gain_db, style: "width:100%",
+      oninput: e => { st.bg_gain_db = +e.target.value; gain.textContent = (st.bg_gain_db > 0 ? "+" : "") + st.bg_gain_db + " dB"; saveSt(); } });
+    const duck = h("label", { class: "check" }, h("input", { type: "checkbox", checked: st.duck, onchange: e => { st.duck = e.target.checked; saveSt(); } }), "配音说话时背景再压低一点");
+    const bil = h("label", { class: "check" }, h("input", { type: "checkbox", checked: st.bilingual, onchange: e => { st.bilingual = e.target.checked; saveSt(); buildStyle(); } }), "双语（第二行显示原文）");
+    const custom = h("div", { class: "grid", style: "margin-top:8px" },
+      field("分辨率（短边）", selectEl("height", [["", "保持原分辨率"], [2160, "2160p 4K"], [1440, "1440p"], [1080, "1080p"], [720, "720p"], [480, "480p"]]), "只缩小不放大，保持画面比例"),
+      field("帧率", selectEl("fps", [["", "保持原帧率"], [24, "24"], [25, "25"], [30, "30"], [50, "50"], [60, "60"]])),
+      field("编码", selectEl("codec", [["h264", "H.264（兼容最好）"], ["h265", "H.265 / HEVC（体积更小）"]])),
+      field("画质", selectEl("quality", [["high", "高（CRF 18）"], ["standard", "标准（CRF 23）"], ["small", "小体积（CRF 28）"]])),
+      field("格式", selectEl("container", [["mp4", "MP4"], ["mkv", "MKV"], ["mov", "MOV"]])));
+    const modeSel = selectEl("mode", [["keep", "保持原视频格式和质量"], ["custom", "自定义规格"]], () => { custom.style.display = st.mode === "custom" ? "" : "none"; });
+    custom.style.display = st.mode === "custom" ? "" : "none";
+    const srcDesc = vi.width ? `原视频：${vi.width}×${vi.height} · ${vi.fps} fps · ${vi.codec}${vi.bit_rate ? " · " + (vi.bit_rate / 1e6).toFixed(1) + " Mbps" : ""} · ${vi.container}` : "";
+    styleBox = h("div");
+    const msg = h("span", { class: "hint" });
+    startBtn = h("button", { class: "btn primary", type: "button", onclick: async () => {
+      if (!st.dub) return alert("先在「AI 配音」里生成配音并合成总音频");
+      const compose = { separation: st.separation, bg_gain_db: +st.bg_gain_db, duck: st.duck, extend: st.extend, subtitles: st.subtitles, bilingual: st.bilingual,
+        spec: st.mode === "keep" ? { mode: "keep" } : { mode: "custom", height: st.height ? +st.height : null, fps: st.fps ? +st.fps : null,
+          codec: st.codec, quality: st.quality, container: st.container } };
+      startBtn.disabled = true; msg.textContent = "提交中…";
+      try { setP(await api(base + "/video", { dub: st.dub, compose })); msg.textContent = ""; update(true); }
+      catch (e) { msg.textContent = ""; alert(e.message); }
+      startBtn.disabled = false;
+    } }, ico("video"), "生成翻译视频");
+    listEl = h("div", { style: "display:flex;flex-direction:column;gap:12px;margin-top:14px" });
+    box.append(h("div", { class: "card" },
+      h("h3", {}, ico("video"), "③ 翻译视频", h("span", { class: "muted", style: "font-weight:400;font-size:12px" }, "去掉原视频里的人声、保留背景声，混入 AI 配音，按需压字幕后输出")),
+      h("div", { class: "grid" },
+        field("配音", dubSel, "用哪一次 AI 配音（需要已合成总音频；建议「对齐原视频时间轴」）"),
+        field("背景声", selectEl("separation", [["auto", "分离人声，保留背景（推荐）"], ["uvr", "分离：BS-RoFormer（最好）"], ["demucs", "分离：Demucs"], ["dsp", "分离：快速（质量一般）"], ["none", "不要背景声，只有配音"]]), "第一次分离较慢，之后复用"),
+        h("div", { class: "field" }, h("label", { style: "display:flex;justify-content:space-between" }, "背景音量（相对原片比例）", gain), gainR, duck),
+        field("字幕", selectEl("subtitles", [["burn", "硬字幕（压进画面）"], ["soft", "软字幕（可在播放器里开关）"], ["both", "硬字幕 + 软字幕"], ["none", "不加字幕"]], buildStyle), null),
+        h("div", { class: "field", style: "justify-content:flex-end" }, bil,
+          h("label", { class: "check", title: "配音比原视频长时：定格最后一帧直到配音说完；不勾选则结尾被截断" }, h("input", { type: "checkbox", checked: st.extend, onchange: e => { st.extend = e.target.checked; saveSt(); } }), "配音超出时延长画面"))),
+      h("div", { style: "margin-top:12px" }, styleBox),
+      h("div", { class: "sec-title", style: "margin-top:14px" }, "输出规格"),
+      h("div", { class: "grid" }, field("规格", modeSel, st.mode === "keep" ? "不压硬字幕时视频流原样复制（无损、最快）；压硬字幕时用原编码、原分辨率帧率和接近原码率重新编码" : ""),
+        h("div", { class: "field" }, h("label", {}, " "), h("div", { class: "hint" }, srcDesc))),
+      custom,
+      h("div", { class: "row", style: "margin-top:14px" }, startBtn, msg),
+      listEl));
+    buildStyle();
+  }
+
+  function videoRow(v) {
+    const s = DV_STAGE[v.stage] || v.stage || "";
+    const pct = Math.round((v.progress || 0) * 100);
+    const badge = v.status === "done" ? h("span", { class: "badge ok" }, "完成") : v.status === "error" ? h("span", { class: "badge err" }, "失败")
+      : h("span", { class: "badge run" }, `${s}${v.stage === "encode" ? " " + pct + "%" : ""}`);
+    const c = v.compose || {}, sp = c.spec || {};
+    const desc = `${{ burn: "硬字幕", soft: "软字幕", both: "硬 + 软字幕", none: "无字幕" }[c.subtitles] || ""}${c.bilingual ? " · 双语" : ""} · ` +
+      (sp.mode === "custom" ? `${sp.height ? sp.height + "p" : "原分辨率"} · ${sp.codec} · ${sp.quality} · ${sp.container}` : "保持原规格");
+    const row = h("div", { style: "border:1px solid var(--line);border-radius:10px;padding:10px 12px" },
+      h("div", { class: "row", style: "gap:8px" }, badge, h("span", { class: "muted", style: "font-size:12.5px" }, new Date(v.created * 1000).toLocaleString() + " · " + desc)));
+    if (v.status === "error") row.append(h("pre", { style: "margin-top:8px;white-space:pre-wrap" }, v.error || ""));
+    if (v.status === "done" && v.urls) {
+      const r = v.report || {}, o = r.output || {}, mx = r.mix || {};
+      row.append(h("video", { controls: true, preload: "metadata", src: v.urls.video, style: "width:100%;max-height:420px;background:#000;border-radius:8px;margin-top:8px" }));
+      const info = [`${o.width}×${o.height}`, o.fps + " fps", o.codec, o.bit_rate ? (o.bit_rate / 1e6).toFixed(1) + " Mbps" : "", fmtSize(o.size),
+        o.video_copied ? "视频流原样复制" : "重新编码", mx.background_relative_db != null ? `背景比配音低 ${(-mx.background_relative_db).toFixed(1)} dB` : "无背景声",
+        mx.loudness ? `响度 ${mx.loudness.lufs} LUFS（与原片一致）` : ""].filter(Boolean).join(" · ");
+      row.append(h("div", { class: "hint", style: "margin-top:6px" }, info));
+      if (mx.truncated_s) row.append(h("div", { class: "hint", style: "color:var(--warn)" }, `配音比视频长 ${mx.truncated_s}s，结尾被截断`));
+      if (mx.extended_s) row.append(h("div", { class: "hint", style: "color:var(--warn)" }, `配音比视频长 ${mx.extended_s}s：最后一帧定格到配音说完（可在「音视频翻译」里把译文改短后重新配音）`));
+      const fs = r.font_substituted;
+      if (Array.isArray(fs) && fs.length)          // [{style, from, to, reason}]
+        row.append(h("div", { class: "hint" }, "字体已换成可商用字体（与预览一致）：" +
+          fs.map(x => `${x.style === "Translation" ? "第二行" : "主字幕"} ${x.from} → ${x.to}（${x.reason}）`).join("；")));
+      else if (fs && Array.isArray(fs.missing))    // older results: {missing, used}
+        row.append(h("div", { class: "hint" }, `字体 ${fs.missing.join("、")} 本机没有，已用 ${fs.used} 代替（与预览一致）`));
+      const names = { video: "视频", srt: "字幕 SRT", ass: "字幕 ASS", audio: "混音 WAV", report: "报告" };
+      row.append(h("div", { class: "row", style: "margin-top:8px;gap:6px" }, Object.entries(names).filter(([k]) => v.urls[k]).map(([k, l]) =>
+        h("a", { class: "btn small", href: v.urls[k], download: (v.files || {})[k] || "" }, ico("download"), l))));
+    }
+    return row;
+  }
+
+  function update(force) {
+    const P = getP();
+    if (!P.is_video) { box.innerHTML = ""; built = false; return; }
+    const dubKey = JSON.stringify((P.dub_info || []).map(d => [d.id, d.mix, d.built]));
+    if (!built || (dubKey !== sig && !(document.activeElement && box.contains(document.activeElement)))) { sig = dubKey; build(); }
+    const vs = [...(P.videos || [])].reverse();
+    const vsig = JSON.stringify(vs.map(v => [v.id, v.status, v.stage, Math.round((v.progress || 0) * 50)]));
+    if (force || listEl.dataset.sig !== vsig) {
+      listEl.dataset.sig = vsig;
+      listEl.innerHTML = "";
+      vs.forEach(v => listEl.append(videoRow(v)));
+    }
+  }
+  update();
+  return update;
 }
 
 // ---------------------------------------------------------------- formats page

@@ -15,3 +15,7 @@ dist/
 /tools/
 /webui_data/
 /.uv-cache/
+
+# font packages (user supplied) and the extracted / downloaded font library
+/fonts/*.zip
+/fonts/free/

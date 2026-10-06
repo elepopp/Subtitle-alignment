@@ -109,7 +109,21 @@ class TTSWorker:
             if line.startswith("@@RESULT "):
                 return json.loads(line[len("@@RESULT "):])
 
+    # after one of these the CUDA context of the worker is broken: every later request
+    # fails the same way until the process is restarted
+    FATAL = ("CUDA error", "AcceleratorError", "CUBLAS_STATUS", "cuDNN error", "TTS worker exited")
+
     def request(self, **req) -> Dict:
+        try:
+            return self._request(dict(req))
+        except (RuntimeError, OSError, ValueError) as e:
+            if not any(k in str(e) for k in self.FATAL) or req.get("cmd") == "quit":
+                raise
+            log.warning("TTS worker failed (%s): restarting it and retrying once", str(e)[:200])
+            self._kill()
+            return self._request(dict(req))
+
+    def _request(self, req: Dict) -> Dict:
         with self.lock:
             self.start()
             self._id += 1
@@ -123,6 +137,16 @@ class TTSWorker:
                     if not r.get("ok"):
                         raise RuntimeError(r.get("error", "TTS failed"))
                     return r
+
+    def _kill(self) -> None:
+        with self.lock:
+            if self.proc and self.proc.poll() is None:
+                self.proc.kill()
+                try:
+                    self.proc.wait(timeout=10)
+                except Exception:
+                    pass
+            self.proc = None
 
     def stop(self) -> None:
         if self.proc and self.proc.poll() is None:
@@ -180,7 +204,8 @@ def _timed_segments(sentences: List[Dict], lang: str) -> List[Dict]:
         if s.get("end") is not None and nxt is not None:
             pause = round(max(0.1, min(3.0, nxt - s["end"])), 2)
         out.append({"text": t, "tts_text": tts, "pause_after": pause, "emphasis": emph, "paragraph_end": False,
-                    "src_start": s.get("start"), "src_end": s.get("end"), "source_text": s.get("source_text")})
+                    "src_start": s.get("start"), "src_end": s.get("end"), "source_text": s.get("source_text"),
+                    "dt_id": s.get("dt_id")})
     return out
 
 
