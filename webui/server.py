@@ -1682,6 +1682,7 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
     src_audio = next((Path(p) for p in (src.get("vocals_path"), src.get("media_path")) if p and Path(p).exists()), None)
     timed = timeline and all(s["start"] is not None for s in sents)
     speakers_info: Dict[str, Any] = {}
+    acoustics_info: Dict[str, Any] = {}
     try:
         spk_p = await _ref_audio(ddir / "ref", spk, spk_recording)
         emo_p = await _ref_audio(ddir / "ref", emo, emo_recording)
@@ -1712,6 +1713,8 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
             for s, a in zip(sents, ana["sentences"]):
                 s.update({k: v for k, v in a.items() if v is not None})
             speakers_info = ana["speakers"]
+            acoustics_info = ana.get("acoustics") or {}
+            cd.setdefault("match_tone", bool(acoustics_info))
             cd.setdefault("line_ref", line_refs)
             cd.setdefault("follow_dynamics", True)
             cd.setdefault("source_pauses", True)
@@ -1728,11 +1731,11 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
     cd.update(lang=TTS_LANG.get(tgt, tgt.split("-")[0].upper()),
               timeline=bool(timeline and all(s["start"] is not None for s in sents)))
     if not expressive:
-        cd.update(line_ref=False, follow_dynamics=False, source_pauses=False)
+        cd.update(line_ref=False, follow_dynamics=False, source_pauses=False, match_tone=False)
     cfg = dubbing.DubConfig(**{k: v for k, v in cd.items() if k in dubbing.DubConfig.__dataclass_fields__})
     dp = dubbing.create_project(ddir, "", spk_p, emo_p, cfg, title or proj.get("title", ""), sentences=sents,
                                 source={"dubtrans": pid, "media_url": _dt_view(pid).get("media_url")},
-                                speakers=speakers_info)
+                                speakers=speakers_info, acoustics=acoustics_info)
     with _dt_lock:
         p2 = _dt_get(pid)
         p2.setdefault("dubbing", []).append(did)
@@ -1741,6 +1744,129 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
         ollama.unload_all()                         # the translation model would crowd out IndexTTS
         _tts_enqueue(did, [s["id"] for s in dp["segments"]])
     return {"id": did}
+
+
+# ------------------------------------------------------------------ blind listening tests (盲听对比)
+LISTEN_DIR = paths.WORK / "listening"
+
+
+def _listen_dir(tid: str) -> Path:
+    d = LISTEN_DIR / Path(tid).name
+    if not (d / "test.json").exists():
+        raise HTTPException(404, "test not found")
+    return d
+
+
+def _dub_source_audio(proj: Dict[str, Any]) -> Optional[Path]:
+    """The original recording behind a translated dub: its vocals stem when there is one."""
+    did = (proj.get("source") or {}).get("dubtrans")
+    if not did or not (DT_DIR / did / "project.json").exists():
+        return None
+    d = DT_DIR / did
+    src = json.loads((d / "project.json").read_text(encoding="utf-8")).get("source", {})
+    for c in (d / "stems" / "vocals.wav", src.get("vocals_path"), src.get("media_path")):
+        if c and Path(c).exists():
+            return Path(c)
+    return None
+
+
+@app.get("/api/listen/candidates")
+def listen_candidates():
+    """Dubbing projects with generated sentences, grouped by the translation they dub."""
+    out = []
+    for f in sorted(DUB_DIR.glob("*/project.json"), reverse=True) if DUB_DIR.exists() else []:
+        try:
+            p = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        done = sum(1 for s in p.get("segments", []) if s.get("audio"))
+        if done:
+            out.append({"id": f.parent.name, "title": p.get("title", ""), "done": done, "total": len(p.get("segments", [])),
+                        "dubtrans": (p.get("source") or {}).get("dubtrans"),
+                        "config": {k: p.get("config", {}).get(k) for k in ("line_ref", "stable_timbre", "pace", "timeline")}})
+    return out
+
+
+@app.post("/api/listen/tests")
+def listen_create(body: Dict[str, Any] = Body(...)):
+    from subalign import listening
+    from subalign.tts import dubbing
+
+    a, b = str(body.get("a") or ""), str(body.get("b") or "")
+    if not a or not b or a == b:
+        raise HTTPException(400, "请选择两个不同的配音项目")
+    da, db = _dub_dir(a), _dub_dir(b)
+    pa, pb = dubbing.load(da), dubbing.load(db)
+    tid = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+    try:
+        listening.create(LISTEN_DIR / tid, pa, da, pb, db, (body.get("label_a") or "A").strip()[:40],
+                         (body.get("label_b") or "B").strip()[:40], n=max(1, min(100, int(body.get("n") or 20))),
+                         source=_dub_source_audio(pa), title=(body.get("title") or "").strip()[:80])
+    except ValueError as e:
+        shutil.rmtree(LISTEN_DIR / tid, ignore_errors=True)
+        raise HTTPException(400, str(e))
+    return listen_get(tid)
+
+
+@app.get("/api/listen/tests")
+def listen_list():
+    from subalign import listening
+
+    out = []
+    for f in sorted(LISTEN_DIR.glob("*/test.json"), reverse=True) if LISTEN_DIR.exists() else []:
+        try:
+            t = listening.load(f.parent)
+        except (OSError, json.JSONDecodeError):
+            continue
+        v = listening.view(t)
+        out.append({"id": f.parent.name, "title": v["title"], "created": v["created"], "n": len(v["items"]),
+                    "answered": len(v["answers"]), "revealed": v["revealed"], "tally": v.get("tally")})
+    return out
+
+
+@app.get("/api/listen/tests/{tid}")
+def listen_get(tid: str):
+    from subalign import listening
+
+    v = listening.view(listening.load(_listen_dir(tid)))
+    v["id"] = tid
+    for it in v["items"]:
+        base = f"/listen/{tid}/{it['id']:03d}"
+        it.update(x=f"{base}_x.wav", y=f"{base}_y.wav", o=f"{base}_o.wav" if it["original"] else None)
+    return v
+
+
+@app.post("/api/listen/tests/{tid}/answer")
+def listen_answer(tid: str, body: Dict[str, Any] = Body(...)):
+    from subalign import listening
+
+    try:
+        listening.answer(_listen_dir(tid), int(body.get("item")), str(body.get("choice")), str(body.get("note") or ""))
+    except (KeyError, ValueError, TypeError) as e:
+        raise HTTPException(400, f"answer: {e}")
+    return listen_get(tid)
+
+
+@app.post("/api/listen/tests/{tid}/reveal")
+def listen_reveal(tid: str):
+    from subalign import listening
+
+    listening.reveal(_listen_dir(tid))
+    return listen_get(tid)
+
+
+@app.delete("/api/listen/tests/{tid}")
+def listen_delete(tid: str):
+    shutil.rmtree(_listen_dir(tid), ignore_errors=True)
+    return {"ok": True}
+
+
+@app.get("/listen/{tid}/{name}")
+def listen_file(tid: str, name: str):
+    p = _listen_dir(tid) / Path(name).name
+    if not p.is_file() or p.suffix != ".wav":
+        raise HTTPException(404)
+    return FileResponse(p, headers={"Cache-Control": "no-store"})
 
 
 # ------------------------------------------------------------------ translated video (视频翻译)

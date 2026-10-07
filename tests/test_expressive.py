@@ -175,7 +175,8 @@ def _dub(tmp_path, **cfg_kw):
     cfg = DubConfig(qa=False, breaths=False, lang="EN", timeline=True, line_ref=True, follow_dynamics=True,
                     source_pauses=True, **cfg_kw)
     spk = ana["speakers"]["S1"]["ref"]
-    dubbing.create_project(tmp_path / "p", "", spk, None, cfg, sentences=sents, speakers=ana["speakers"])
+    dubbing.create_project(tmp_path / "p", "", spk, None, cfg, sentences=sents, speakers=ana["speakers"],
+                           acoustics=ana["acoustics"])
     return tmp_path / "p", ana
 
 
@@ -244,3 +245,18 @@ def test_line_over_silence_is_skipped(tmp_path):
     sents.append({"start": sents[-1]["end"] + 0.1, "end": sents[-1]["end"] + 0.45, "speaker": "A"})   # trailing silence
     r = expressive.analyze_source(sents, p, tmp_path / "ref", expressive.ExprConfig(diarize=False))["sentences"]
     assert r[-1]["line"] is None and r[-1]["src_level"] is None and r[-1]["expr"] == 0.0
+
+
+@needs_ffmpeg
+def test_assemble_matches_the_tonal_balance(tmp_path):
+    pdir, ana = _dub(tmp_path)
+    assert set(ana["acoustics"]) == {"S1", "S2"} and len(ana["acoustics"]["S1"]["bands"]) == 23
+    w = FakeWorker()
+    for sid in (1, 2, 3, 4):
+        dubbing.synth_segment(pdir, sid, w)
+    assert dubbing.assemble(pdir, dubbing.load(pdir))["tone_eq"] == {}          # off by default
+    dubbing.set_config(pdir, match_tone=True)
+    mix = dubbing.assemble(pdir, dubbing.load(pdir))
+    assert set(mix["tone_eq"]) == {"S1", "S2"}
+    g = np.array(mix["tone_eq"]["S1"])
+    assert np.all(np.abs(g) <= 6.0) and np.any(np.abs(g) > 0.5)
