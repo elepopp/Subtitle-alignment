@@ -925,7 +925,7 @@ def _dub_view(pid: str) -> Dict[str, Any]:
         elif s.get("status") == "running" and st.get("running") != s["id"]:
             s["status"] = "error" if not s.get("audio") else "done"     # interrupted by a restart
         s["url"] = f"/dub/{pid}/{s['audio']}?v={s.get('updated', 0)}" if s.get("audio") else None
-        s["emo_url"] = _dub_rel_url(pid, s.get("emo"))
+        s["line_url"] = _dub_rel_url(pid, s.get("line"))
         for t in s.get("takes", []):
             t["url"] = f"/dub/{pid}/{t['file']}"
     if proj.get("mix"):
@@ -1652,10 +1652,11 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
                         separate: bool = Form(True)):
     """The translation -> an AI voice-over project (one sentence each, original timing kept).
 
-    ``expressive`` (with the original recording and timing): each speaker is cloned
-    separately and every sentence takes its emotion from its own original line; loudness
-    and in-sentence pauses follow the original (:mod:`subalign.tts.expressive`).  An
-    uploaded voice A replaces the per-speaker voices, an emotion B the per-line emotion.
+    ``expressive`` (with the original recording and timing): every sentence is generated
+    from its own original line - aligned to the audio, cut in the gaps, checked by ear
+    (:mod:`subalign.tts.linerefs`); loudness and in-sentence pauses follow the original
+    (:mod:`subalign.tts.expressive`).  An uploaded voice A or emotion B replaces the
+    line references (one voice / one tone for everything).
     Without a vocals stem the original is separated first (``separate``; cached and
     reused by the translated video), so music does not end up in the references."""
     import asyncio
@@ -1665,9 +1666,10 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
     proj = _dt_get(pid)
     if _dt_state.get(pid, {}).get("busy"):
         raise HTTPException(409, "还在翻译，请等翻译完成")
+    # sound-event lines ([music], (applause)) are not read out: the background has the sound
     sents = [{"text": s.get("translation") or "", "start": s.get("start"), "end": s.get("end"), "source_text": s["text"],
               "dt_id": s["id"], "speaker": s.get("speaker")}
-             for s in proj["sentences"] if (s.get("translation") or "").strip()]
+             for s in proj["sentences"] if (s.get("translation") or "").strip() and not expr.is_event(s["text"])]
     if not sents:
         raise HTTPException(400, "还没有译文")
     try:
@@ -1685,9 +1687,10 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
         emo_p = await _ref_audio(ddir / "ref", emo, emo_recording)
         if spk_p is None and not use_source:
             raise HTTPException(400, "请上传或选择音色参考 A")
-        voice_refs, emo_refs = spk_p is None, emo_p is None
+        voice_refs = spk_p is None
+        line_refs = voice_refs and emo_p is None
         ana = None
-        if expressive and timed and src_audio is not None and (voice_refs or emo_refs):
+        if expressive and timed and src_audio is not None:
             media = src.get("media_path")
             if separate and not (src.get("vocals_path") and Path(src["vocals_path"]).exists()) and media and Path(media).exists():
                 from subalign.dubvideo import separate_background
@@ -1701,14 +1704,15 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
             try:
                 ana = await asyncio.to_thread(
                     expr.analyze_source, sents, src_audio, ddir / "ref",
-                    expr.ExprConfig(diarize=diarize, n_speakers=speakers or None), voice_refs=voice_refs, emo_refs=emo_refs)
+                    expr.ExprConfig(diarize=diarize, n_speakers=speakers or None), voice_refs=voice_refs,
+                    line_refs=line_refs, lang=(proj["config"].get("source") or "").split("-")[0] or None)
             except Exception:                       # fall back to one voice / one tone
                 log.exception("analysis of the original performance failed")
         if ana is not None:
             for s, a in zip(sents, ana["sentences"]):
                 s.update({k: v for k, v in a.items() if v is not None})
             speakers_info = ana["speakers"]
-            cd.setdefault("source_emo", emo_refs)
+            cd.setdefault("line_ref", line_refs)
             cd.setdefault("follow_dynamics", True)
             cd.setdefault("source_pauses", True)
         else:
@@ -1724,7 +1728,7 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
     cd.update(lang=TTS_LANG.get(tgt, tgt.split("-")[0].upper()),
               timeline=bool(timeline and all(s["start"] is not None for s in sents)))
     if not expressive:
-        cd.update(source_emo=False, follow_dynamics=False, source_pauses=False)
+        cd.update(line_ref=False, follow_dynamics=False, source_pauses=False)
     cfg = dubbing.DubConfig(**{k: v for k, v in cd.items() if k in dubbing.DubConfig.__dataclass_fields__})
     dp = dubbing.create_project(ddir, "", spk_p, emo_p, cfg, title or proj.get("title", ""), sentences=sents,
                                 source={"dubtrans": pid, "media_url": _dt_view(pid).get("media_url")},
@@ -1763,7 +1767,13 @@ def _dv_sentences(proj: Dict[str, Any], did: Optional[str]) -> List[Dict[str, An
                             "original": (src or {}).get("text") or seg.get("source_text"),
                             "start": t["start"], "end": t["end"]})
             if out:
-                return out
+                # sound-event lines ([music]) are not dubbed but still captioned, at their own time
+                from subalign.tts.expressive import is_event
+
+                out += [{"text": s.get("translation") or "", "original": s["text"], "start": s["start"], "end": s["end"]}
+                        for s in proj["sentences"] if s.get("translation") and s.get("start") is not None
+                        and s.get("end") is not None and is_event(s["text"])]
+                return sorted(out, key=lambda x: x["start"])
     return [{"text": s.get("translation") or "", "original": s["text"], "start": s.get("start"), "end": s.get("end")}
             for s in proj["sentences"] if s.get("translation") and s.get("start") is not None]
 
