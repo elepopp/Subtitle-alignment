@@ -2413,7 +2413,8 @@ async function renderDubProject(m, pid) {
   const onset = async (k, v) => { try { await api(base + "/config", { [k]: v }); } catch (e) { alert(e.message); } };
   const { voice, natural } = dubParams(st, onset);
   if (P.segments.some(x => x.src_start != null))
-    natural.prepend(dubCheck(st, "timeline", "对齐原视频时间轴（翻译配音）", async (k, v) => { await onset(k, v); act(base + "/assemble"); }));
+    natural.prepend(dubCheck(st, "timeline", "对齐原视频时间轴（翻译配音）", async (k, v) => { await onset(k, v); act(base + "/assemble"); }),
+      dubCheck(st, "pace", "按时间轴控制语速：放不下时模型自己说快，不做后期加速、不推迟；比原句短时只稍放慢（之后生成的句子生效）", onset));
   // performance carried over from the original (translated dub with the original recording)
   const remix = async (k, v) => { await onset(k, v); act(base + "/assemble"); };
   if (P.segments.some(x => x.line))

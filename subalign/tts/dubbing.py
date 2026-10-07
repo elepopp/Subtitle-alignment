@@ -82,6 +82,16 @@ class DubConfig:
     # language model (rhythm, tone) on the line (``timbre`` in ``webui/tts_worker.py``) -
     # a short line alone as the reference made the voice drift (similarity 0.65 vs 0.75)
     stable_timbre: bool = True
+    # on a timeline every take is generated at the pace that fits it before the next
+    # sentence: the renderer speaks faster itself (``target`` in ``webui/tts_worker.py``,
+    # down to ``pace_min`` of its natural length) instead of the take being sped up
+    # afterwards or pushed late.  A take shorter than the original line is only slowed a
+    # little (``pace_max``) and not slowed again on assembly: Chinese is shorter than the
+    # English it replaces (here 0.81 of the original's length at a normal 0.97x Chinese
+    # rate), and filling the original's length made it ~20% too slow
+    pace: bool = True
+    pace_min: float = 0.82
+    pace_max: float = 1.05
     # sentence loudness follows the original line (offset from the median, capped)
     # instead of being evened out
     follow_dynamics: bool = False
@@ -540,6 +550,35 @@ def _best_take(takes: List[Dict], ranked: bool) -> Dict:
     return min(checked, key=_err) if checked else takes[0]
 
 
+DEFAULT_EDGE = 0.25
+
+
+def take_edges(proj: Dict, n: int = 30) -> float:
+    """Seconds of silence / noise a raw take has around its speech (removed by
+    :func:`trim_take`), from the project's recent takes."""
+    d = [t["duration"] - t["speech"] for s in proj["segments"] for t in s.get("takes", [])
+         if t.get("duration") and t.get("speech")]
+    return float(np.median(d[-n:])) if d else DEFAULT_EDGE
+
+
+def pace_target(proj: Dict, seg: Dict, cfg: DubConfig) -> Optional[float]:
+    """Raw length (seconds) a take of ``seg`` should have: the original line's length,
+    never more than the time until the next sentence, at the project's speed, plus the
+    usual silence around a take's speech.  None when the sentence is not on a timeline."""
+    from .takeqa import slot_for
+
+    if not (cfg.timeline and cfg.pace and seg.get("src_start") is not None and seg.get("src_end") is not None):
+        return None
+    i = proj["segments"].index(seg)
+    slot = slot_for(seg, proj["segments"][i + 1] if i + 1 < len(proj["segments"]) else None)
+    want = seg["src_end"] - seg["src_start"]
+    if slot:
+        want = min(want, slot)
+    if want <= 0.2:
+        return None
+    return round(want / max(0.5, min(2.0, cfg.speed)) + take_edges(proj), 3)
+
+
 def synth_segment(pdir: Path, sid: int, worker: Optional[TTSWorker] = None) -> Dict:
     """(Re)generate one sentence.  With QA it tries up to ``max_tries`` seeds until a
     take reads correctly; with ``pick_best`` at least ``candidates`` takes are made and
@@ -558,6 +597,7 @@ def synth_segment(pdir: Path, sid: int, worker: Optional[TTSWorker] = None) -> D
     ranked = cfg.pick_best
     at_least = max(1, int(cfg.candidates)) if ranked else 1
     tries = max(at_least, cfg.max_tries if cfg.qa else 1)
+    target = pace_target(proj, seg, cfg)
     slot = None
     if ranked and cfg.timeline:
         i = proj["segments"].index(seg)
@@ -570,9 +610,15 @@ def synth_segment(pdir: Path, sid: int, worker: Optional[TTSWorker] = None) -> D
             out = pdir / "seg" / f"{sid:04d}_{int(time.time() * 1000) % 10 ** 9:09d}.wav"
             r = worker.request(cmd="synth", text=tts_text, spk=spk, emo=emo,
                                emo_alpha=alpha, duration_factor=round(1 / max(0.5, min(2.0, cfg.speed)), 4),
-                               seed=seed, out=str(out), lang=cfg.lang, timbre=timbre)
+                               seed=seed, out=str(out), lang=cfg.lang, timbre=timbre, target=target,
+                               pace_range=[cfg.pace_min, cfg.pace_max])
             take = {"file": f"seg/{out.name}", "seed": seed, "duration": r.get("duration"), "seconds": r.get("seconds"),
-                    "text": text, "emo_alpha": alpha if emo else None, "timbre": bool(timbre)}
+                    "text": text, "emo_alpha": alpha if emo else None, "timbre": bool(timbre),
+                    "target": target, "natural": r.get("natural"), "pace": r.get("pace")}
+            try:
+                take["speech"] = round(len(trim_take(_load(out))) / SR, 3)
+            except Exception as e:
+                log.warning("could not measure take %s: %s", out.name, e)
             if cfg.qa:
                 try:
                     take["qa"] = check_take(out, text, cfg.lang.lower())
@@ -602,7 +648,7 @@ def synth_segment(pdir: Path, sid: int, worker: Optional[TTSWorker] = None) -> D
         s = find(p, sid)
         s["takes"] = s.get("takes", []) + takes
         s["audio"], s["qa"], s["error"] = best["file"], best.get("qa"), None
-        s["measure"], s["score"] = best.get("measure"), best.get("score")
+        s["measure"], s["score"], s["paced"] = best.get("measure"), best.get("score"), best.get("pace") is not None
         bad = cfg.qa and (s["qa"] or {}).get("error") is not None and s["qa"]["error"] > cfg.max_error
         s["status"] = "edited" if s["text"] != text else ("check" if bad else "done")
         s["updated"] = _now()
@@ -615,7 +661,7 @@ def use_take(pdir: Path, sid: int, file: str) -> Dict:
         s = find(p, sid)
         t = next(t for t in s.get("takes", []) if t["file"] == file)
         s["audio"], s["qa"], s["status"] = t["file"], t.get("qa"), "done"
-        s["measure"], s["score"] = t.get("measure"), t.get("score")
+        s["measure"], s["score"], s["paced"] = t.get("measure"), t.get("score"), t.get("pace") is not None
     return find(update(pdir, fn), sid)
 
 
@@ -701,12 +747,13 @@ def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
     return _finish(pdir, proj, np.concatenate(parts), timing, cfg, tone_lvl, out)
 
 
-def fit_factor(length: float, slot: float, natural: float, cfg: DubConfig) -> float:
+def fit_factor(length: float, slot: float, natural: float, cfg: DubConfig, paced: bool = False) -> float:
     """Tempo factor (> 1 = faster) for a take of ``length`` s in a slot of ``slot`` s
-    (until the next sentence) where the original took ``natural`` s."""
+    (until the next sentence) where the original took ``natural`` s.  A ``paced`` take
+    (generated at its pace already) is only sped up when it still does not fit."""
     if length > slot > 0:
         return min(cfg.max_stretch, length / slot)
-    if natural > 0 and length < natural * 0.85:
+    if not paced and natural > 0 and length < natural * 0.85:
         return max(cfg.min_stretch, length / natural)
     return 1.0
 
@@ -725,7 +772,7 @@ def _place_on_timeline(clips: List[np.ndarray], segs: List[Dict], cfg: DubConfig
         nxt = segs[i + 1]["src_start"] if i + 1 < len(segs) else None
         natural = (s.get("src_end") or s["src_start"]) - s["src_start"]
         slot = (nxt - s["src_start"] - 0.08) if nxt is not None else natural + 1.0
-        f = fit_factor(len(c) / SR, slot, natural, cfg)
+        f = fit_factor(len(c) / SR, slot, natural, cfg, paced=bool(s.get("paced")))
         if abs(f - 1) >= 0.01:
             c = stretch(c, f)
         at = max(start, cursor + (gap_min if placed else 0))
