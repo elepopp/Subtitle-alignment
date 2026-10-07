@@ -60,11 +60,12 @@ def test_create_answer_reveal(tmp_path):
     assert 0 < sum(flips) < 8                          # X is sometimes A, sometimes B
     for it in t["items"]:
         k = f"{it['id']:03d}"
-        x, _ = sf.read(tdir / f"{k}_x.wav")
+        x, sr = sf.read(tdir / f"{k}_x.wav")
         y, _ = sf.read(tdir / f"{k}_y.wav")
         o, _ = sf.read(tdir / f"{k}_o.wav")
-        assert abs(level_db(x, SR) - level_db(y, SR)) < 1.0 and abs(level_db(o, SR) - level_db(x, SR)) < 1.0
-        assert it["original"] and len(o) / SR == pytest.approx(1.2 + 0.35, abs=0.02)
+        assert sr == listening.SR
+        assert abs(level_db(x, sr) - level_db(y, sr)) < 1.0 and abs(level_db(o, sr) - level_db(x, sr)) < 1.0
+        assert it["original"] and len(o) / sr == pytest.approx(1.2 + 0.35, abs=0.02)
     # before the reveal the page sees nothing that tells A from B
     v = listening.view(t)
     assert "tally" not in v and "a" not in v and all(set(i) == {"id", "text", "source_text", "original"} for i in v["items"])

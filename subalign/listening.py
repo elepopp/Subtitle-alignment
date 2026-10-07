@@ -25,7 +25,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-SR = 24000
+SR = 48000                  # full band: a 24 kHz test would hide everything above 12 kHz
 LEVEL_DB = -20.0            # active speech level every clip is brought to
 CHOICES = ("x", "y", "same")
 
