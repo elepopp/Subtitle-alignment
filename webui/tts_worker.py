@@ -6,12 +6,19 @@ stdout prefixed with ``@@RESULT `` (the library prints its own progress lines).
 
     {"id": 1, "cmd": "synth", "text": "...", "spk": "a.wav", "emo": "b.wav" | null,
      "emo_alpha": 0.8, "duration_factor": 1.0, "seed": 1234, "out": "seg.wav", "lang": "ZH",
-     "timbre": "voice.wav" | null}
+     "timbre": "voice.wav" | null, "target": 3.2 | null, "pace_range": [0.82, 1.12]}
 
 ``timbre`` splits the two stages of IndexTTS-2.5: the language model (content, rhythm,
 tone) is conditioned on ``spk`` as usual, the acoustic renderer (s2mel, which largely
 decides the timbre) on ``timbre`` instead - a dubbed sentence takes its delivery from
 its own original line and its voice from the speaker's stable reference.
+
+``target`` (seconds) paces the take: the language model decides how many speech
+tokens a sentence gets, the renderer how many frames they become (tokens x 1.72 x
+``duration_factor``).  Once the tokens are there the natural length is known, so the
+frame count is set to land on ``target`` - within ``pace_range`` of the natural pace -
+and the renderer speaks faster / slower itself instead of the take being time-stretched
+afterwards.  The reply reports ``natural`` (seconds at the natural pace) and ``pace``.
     {"id": 2, "cmd": "ping"}      {"id": 3, "cmd": "quit"}
 """
 from __future__ import annotations
@@ -31,6 +38,7 @@ os.chdir(REPO)                              # the library resolves some paths re
 
 _tts = None
 _timbre = {"path": None, "cache": {}}     # the timbre reference of the current request
+_pace = {"target": None, "range": (0.82, 1.12), "next_is_speech": False, "ratio": None, "natural": 0.0}
 
 
 def reply(obj) -> None:
@@ -50,6 +58,7 @@ def load():
         _tts = IndexTTS2(cfg_path=str(MODEL_DIR / "config.yaml"), model_dir=str(MODEL_DIR), use_bf16=bf16,
                          use_cuda_kernel=False, use_deepspeed=False)
         _wrap_renderer(_tts)
+        _wrap_pacing(_tts)
         print(f">> model loaded in {time.time() - t:.1f}s (bf16={bf16})", file=sys.stderr, flush=True)
     return _tts
 
@@ -101,6 +110,42 @@ def _wrap_renderer(tts):
     cfm.inference = inference
 
 
+def _wrap_pacing(tts):
+    """Set the renderer's frame count from the natural length of the speech tokens.
+
+    ``semantic_codec.decode`` turns the language model's tokens into the renderer's
+    input, and the length regulator call right after it gets the frame count; the
+    prompt's own length-regulator call is never preceded by a decode."""
+    import torch
+
+    sp = tts.cfg.s2mel["preprocess_params"]
+    frame_s = sp["spect_params"]["hop_length"] / sp["sr"]
+    codec = tts.semantic_codec
+    decode = codec.decode
+
+    def marked_decode(*a, **kw):
+        _pace["next_is_speech"] = True
+        return decode(*a, **kw)
+
+    reg = tts.s2mel.models["length_regulator"]
+    forward = reg.forward
+
+    def paced_forward(x, ylens=None, n_quantizers=None, f0=None):
+        if _pace["next_is_speech"] and ylens is not None:
+            _pace["next_is_speech"] = False
+            natural = float(ylens[0]) * frame_s
+            _pace["natural"] += natural
+            if _pace["target"]:
+                if _pace["ratio"] is None:          # one ratio for all pieces of a long text
+                    lo, hi = _pace["range"]
+                    _pace["ratio"] = min(hi, max(lo, _pace["target"] / max(natural, 1e-3)))
+                ylens = torch.clamp((ylens.float() * _pace["ratio"]).round().long(), min=1)
+        return forward(x, ylens=ylens, n_quantizers=n_quantizers, f0=f0)
+
+    codec.decode = marked_decode
+    reg.forward = paced_forward
+
+
 def synth(req):
     import torch
 
@@ -120,14 +165,21 @@ def synth(req):
         if k in req:
             kw[k] = req[k]
     _timbre["path"] = req.get("timbre") or None
+    target = float(req.get("target") or 0) or None
+    rng = req.get("pace_range") or (0.82, 1.12)
+    _pace.update(target=target, range=(float(rng[0]), float(rng[1])), next_is_speech=False, ratio=None, natural=0.0)
+    if target:
+        kw["duration_factor"] = 1.0                 # the pace is set from the tokens instead
     try:
         tts.infer(**kw)
     finally:
         _timbre["path"] = None
+        _pace["target"] = None
     import soundfile as sf
 
     info = sf.info(out)
-    return {"out": out, "seconds": round(time.time() - t, 2), "duration": round(info.duration, 3), "sr": info.samplerate}
+    return {"out": out, "seconds": round(time.time() - t, 2), "duration": round(info.duration, 3), "sr": info.samplerate,
+            "natural": round(_pace["natural"], 3), "pace": None if _pace["ratio"] is None else round(_pace["ratio"], 4)}
 
 
 def main():

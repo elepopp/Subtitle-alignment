@@ -221,6 +221,9 @@ def test_fit_factor():
     assert dubbing.fit_factor(1.7, 1.6, 1.5, cfg) == pytest.approx(1.7 / 1.6)
     assert dubbing.fit_factor(1.0, 3.0, 1.5, cfg) == pytest.approx(cfg.min_stretch)
     assert dubbing.fit_factor(1.4, 3.0, 1.5, cfg) == 1.0
+    # a take generated at its pace is not slowed again, only sped up when it does not fit
+    assert dubbing.fit_factor(1.0, 3.0, 1.5, cfg, paced=True) == 1.0
+    assert dubbing.fit_factor(1.7, 1.6, 1.5, cfg, paced=True) == pytest.approx(1.7 / 1.6)
 
 
 def test_timeline_placement_keeps_original_starts():

@@ -94,3 +94,35 @@ def test_short_take_gets_no_voice_score(tmp_path, monkeypatch):
     sf.write(short, np.concatenate([_sil(0.1), _voice(1.0), _sil(0.1)]), SR)
     m = takeqa.measure(short, {}, str(short), slot=None)
     assert m["voice"] is None and not called and m["length"] < takeqa.MIN_VOICE_S
+
+
+def test_pace_target(tmp_path):
+    pdir = _project(tmp_path)
+    proj = dubbing.load(pdir)
+    seg = proj["segments"][0]
+    cfg = dubbing.config(proj)
+    # the original line is 2.5 s, nothing after it: 2.5 s of speech + the default edges
+    assert dubbing.pace_target(proj, seg, cfg) == pytest.approx(2.5 + dubbing.DEFAULT_EDGE)
+    # never longer than the time until the next sentence
+    nxt = dict(seg, id=2, src_start=2.0, src_end=4.0)
+    proj["segments"].append(nxt)
+    assert dubbing.pace_target(proj, seg, cfg) == pytest.approx(1.92 + dubbing.DEFAULT_EDGE)
+    # the project's speed, and the edges measured on its takes
+    seg["takes"] = [{"duration": 3.0, "speech": 2.6}, {"duration": 2.0, "speech": 1.6}]
+    cfg.speed = 1.05
+    assert dubbing.pace_target(proj, seg, cfg) == pytest.approx(1.92 / 1.05 + 0.4, abs=1e-3)
+    cfg.pace = False
+    assert dubbing.pace_target(proj, seg, cfg) is None
+
+
+def test_synth_sends_the_target(tmp_path, monkeypatch):
+    monkeypatch.setattr(takeqa, "voice_similarity", lambda take, ref: 0.8)
+    pdir = _project(tmp_path)
+    dubbing.set_config(pdir, pick_best=False)
+    w = FakeWorker()
+    seg = dubbing.synth_segment(pdir, 1, w)
+    assert w.calls[0]["target"] == pytest.approx(2.5 + dubbing.DEFAULT_EDGE)
+    assert w.calls[0]["pace_range"] == [0.82, 1.05]
+    t = seg["takes"][0]
+    assert t["speech"] == pytest.approx(2.0 + 0.06, abs=0.05)      # trimmed: the 0.2 s silences are gone
+    assert t["target"] == w.calls[0]["target"]
