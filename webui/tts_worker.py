@@ -6,7 +6,11 @@ stdout prefixed with ``@@RESULT `` (the library prints its own progress lines).
 
     {"id": 1, "cmd": "synth", "text": "...", "spk": "a.wav", "emo": "b.wav" | null,
      "emo_alpha": 0.8, "duration_factor": 1.0, "seed": 1234, "out": "seg.wav", "lang": "ZH",
-     "timbre": "voice.wav" | null, "target": 3.2 | null, "pace_range": [0.82, 1.12]}
+     "timbre": "voice.wav" | null, "target": 3.2 | null, "pace_range": [0.82, 1.12],
+     "cfg_rate": 0.7, "steps": 25}
+
+``cfg_rate`` / ``steps``: classifier-free guidance strength and diffusion steps of the
+acoustic renderer (the library's fixed 0.7 / 25 when not given).
 
 ``timbre`` splits the two stages of IndexTTS-2.5: the language model (content, rhythm,
 tone) is conditioned on ``spk`` as usual, the acoustic renderer (s2mel, which largely
@@ -38,6 +42,7 @@ os.chdir(REPO)                              # the library resolves some paths re
 
 _tts = None
 _timbre = {"path": None, "cache": {}}     # the timbre reference of the current request
+_render = {"cfg_rate": None, "steps": None}     # renderer overrides of the current request
 _pace = {"target": None, "range": (0.82, 1.12), "next_is_speech": False, "ratio": None, "natural": 0.0}
 
 
@@ -98,6 +103,10 @@ def _wrap_renderer(tts):
     original = cfm.inference
 
     def inference(cat_condition, lengths, ref_mel, style, f0, steps, **kw):
+        if _render["steps"]:
+            steps = int(_render["steps"])
+        if _render["cfg_rate"] is not None:
+            kw["inference_cfg_rate"] = float(_render["cfg_rate"])
         if not _timbre["path"]:
             return original(cat_condition, lengths, ref_mel, style, f0, steps, **kw)
         n_own = ref_mel.size(-1)                            # the speaker prompt's frames
@@ -165,6 +174,7 @@ def synth(req):
         if k in req:
             kw[k] = req[k]
     _timbre["path"] = req.get("timbre") or None
+    _render.update(cfg_rate=req.get("cfg_rate"), steps=req.get("steps"))
     target = float(req.get("target") or 0) or None
     rng = req.get("pace_range") or (0.82, 1.12)
     _pace.update(target=target, range=(float(rng[0]), float(rng[1])), next_is_speech=False, ratio=None, natural=0.0)
@@ -175,6 +185,7 @@ def synth(req):
     finally:
         _timbre["path"] = None
         _pace["target"] = None
+        _render.update(cfg_rate=None, steps=None)
     import soundfile as sf
 
     info = sf.info(out)

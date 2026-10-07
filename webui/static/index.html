@@ -235,6 +235,19 @@ details.sec[open]>summary.sec-title{margin-bottom:12px}
 .dub-row .src{font-size:11.5px;color:var(--faint);padding:2px 2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dub-row .spk{display:inline-block;font:600 10.5px var(--mono);color:var(--accent);background:var(--accent-weak);border-radius:5px;padding:0 5px;margin-right:6px}
 .dub-row .src button.orig{border:0;background:none;color:var(--accent);cursor:pointer;font:inherit;padding:0 4px 0 0}
+/* ---------- blind listening test */
+.lt-play{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}
+.lt-play button{min-width:120px;justify-content:center}
+.lt-play button.on{outline:2px solid var(--accent);outline-offset:1px}
+.lt-choose{display:flex;gap:10px;flex-wrap:wrap}
+.lt-choose button{flex:1;min-width:140px;justify-content:center;padding:12px}
+.lt-choose button.picked{background:var(--accent);color:#fff;border-color:var(--accent)}
+.lt-dots{display:flex;gap:4px;flex-wrap:wrap;margin:10px 0}
+.lt-dots span{width:22px;height:22px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font:11px var(--mono);
+  background:var(--surface-3);color:var(--muted);cursor:pointer}
+.lt-dots span.done{background:var(--accent-weak);color:var(--accent)}
+.lt-dots span.cur{outline:2px solid var(--accent)}
+.lt-kbd{font:11px var(--mono);border:1px solid var(--line-strong);border-radius:4px;padding:0 4px;margin-left:6px;color:var(--muted)}
 /* ---------- font picker (every font shown as a sample of itself) */
 .fp{position:relative}
 .fp-btn{width:100%;display:flex;align-items:center;gap:8px;padding:5px 10px;min-height:38px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);cursor:pointer;font:inherit;color:var(--text);text-align:left}
@@ -694,13 +707,14 @@ const PAGES = {
   recorder: { nav: "录音棚", icon: "record", render: m => renderRecorder(m) },
   dubbing: { nav: "AI 配音", icon: "voice", render: m => renderDubbing(m) },
   dubtrans: { nav: "音视频翻译", icon: "translate", render: m => renderDubTrans(m) },
+  listen: { nav: "盲听对比", icon: "audio", render: m => renderListen(m) },
   convert: { nav: "格式转换", icon: "convert" }, translate: { nav: "字幕翻译", icon: "translate" }, proofread: { nav: "字幕校对", icon: "check" },
   formats: { nav: "格式与样式", icon: "book", render: renderFormats },
   jobs: { nav: "任务记录", icon: "history", render: renderJobs },
   tests: { nav: "单元测试", icon: "flask", render: renderTests },
 };
 for (const k of Object.keys(TASKS)) PAGES[k].render = () => renderTask(k);
-const NAV = [["", ["status"]], ["对齐", ["align", "lyrics", "separate"]], ["录音与剪辑", ["recorder", "dubtrans", "dubbing", "studio", "roughcut", "videocut"]], ["字幕工具", ["convert", "translate", "proofread"]], ["系统", ["formats", "jobs", "tests"]]];
+const NAV = [["", ["status"]], ["对齐", ["align", "lyrics", "separate"]], ["录音与剪辑", ["recorder", "dubtrans", "dubbing", "listen", "studio", "roughcut", "videocut"]], ["字幕工具", ["convert", "translate", "proofread"]], ["系统", ["formats", "jobs", "tests"]]];
 let current = location.hash.slice(1) || store.get("page", "status");
 
 function renderNav() {
@@ -2219,6 +2233,143 @@ function dubParams(st, onset) {
   return { voice, natural };
 }
 
+// ---------------------------------------------------------------- blind listening test (盲听对比)
+async function renderListen(m) {
+  m.append(pageHead("盲听对比", "同一份译文的两个配音版本，逐句盲听：每句播放原句、X、Y，X / Y 哪个是哪个版本随机且不告诉你，三段已统一响度。答完揭晓胜负和是否可能只是巧合。"));
+  const tid = store.get("listen.test", null);
+  if (tid) {
+    try { return await listenRun(m, await api(`/api/listen/tests/${tid}`, undefined, "GET")); }
+    catch (e) { store.set("listen.test", null); }
+  }
+  const [cands, tests] = await Promise.all([api("/api/listen/candidates", undefined, "GET"), api("/api/listen/tests", undefined, "GET")]);
+  // ---- new test
+  const opt = c => h("option", { value: c.id }, `${c.title || c.id} · ${c.done}/${c.total} 句 · ${c.id}`);
+  const selA = h("select", {}, h("option", { value: "" }, "—— 选择版本 A ——"), cands.map(opt));
+  const selB = h("select", {}, h("option", { value: "" }, "—— 选择版本 B ——"));
+  const labA = h("input", { type: "text", placeholder: "A 的名字，例如：控速关" });
+  const labB = h("input", { type: "text", placeholder: "B 的名字，例如：控速开" });
+  const nIn = h("input", { type: "number", min: "1", max: "100", value: "20", style: "width:90px" });
+  const msg = h("span", { class: "hint" });
+  const cfgText = c => !c ? "" : Object.entries(c.config).filter(([, v]) => v != null).map(([k, v]) => `${k}=${v}`).join(" ");
+  const fillB = () => {
+    const a = cands.find(c => c.id === selA.value);
+    selB.innerHTML = ""; selB.append(h("option", { value: "" }, "—— 选择版本 B ——"));
+    cands.filter(c => c.id !== selA.value && (!a || !a.dubtrans || c.dubtrans === a.dubtrans)).forEach(c => selB.append(opt(c)));
+    msg.textContent = a ? `A：${cfgText(a)}` + (a.dubtrans ? "（只列出同一份译文的配音）" : "") : "";
+  };
+  selA.addEventListener("change", fillB);
+  selB.addEventListener("change", () => { const b = cands.find(c => c.id === selB.value); if (b) msg.textContent = msg.textContent.split(" ｜")[0] + ` ｜ B：${cfgText(b)}`; });
+  fillB();
+  const go_ = h("button", { class: "btn primary", type: "button" }, ico("play"), "生成测试");
+  go_.addEventListener("click", async () => {
+    if (!selA.value || !selB.value) return alert("请选择两个配音项目");
+    go_.disabled = true; msg.textContent = "准备音频…";
+    try {
+      const t = await api("/api/listen/tests", { a: selA.value, b: selB.value, label_a: labA.value || "A", label_b: labB.value || "B", n: +nIn.value || 20 });
+      store.set("listen.test", t.id); go("listen");
+    } catch (e) { alert(e.message); go_.disabled = false; msg.textContent = ""; }
+  });
+  m.append(h("div", { class: "card" }, h("h3", {}, ico("audio"), "新建盲听测试"),
+    cands.length < 2 ? h("div", { class: "note" }, "至少需要两个已生成句子的配音项目（例如同一份译文用不同设置各配一次）。") : null,
+    h("div", { class: "split" },
+      h("div", { class: "field" }, h("label", {}, "版本 A"), selA, labA),
+      h("div", { class: "field" }, h("label", {}, "版本 B"), selB, labB)),
+    h("div", { class: "row", style: "margin-top:10px;align-items:center;gap:12px" }, h("label", {}, "抽取句数"), nIn, go_, msg)));
+  // ---- earlier tests
+  const list = h("div", {});
+  for (const t of tests) {
+    const res = t.revealed && t.tally ? ` · A ${t.tally.a} : B ${t.tally.b}（差不多 ${t.tally.same}）p=${t.tally.p}` : ` · 已答 ${t.answered}/${t.n}`;
+    list.append(h("div", { class: "row", style: "justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line)" },
+      h("a", { href: "#", onclick: e => { e.preventDefault(); store.set("listen.test", t.id); go("listen"); } }, t.title), h("span", { class: "muted" }, res),
+      h("button", { class: "btn small", type: "button", onclick: async () => { if (!confirm("删除这个测试？")) return; await api(`/api/listen/tests/${t.id}`, undefined, "DELETE"); go("listen"); } }, "删除")));
+  }
+  if (tests.length) m.append(h("div", { class: "card" }, h("h3", {}, ico("history"), "已有测试"), list));
+}
+
+async function listenRun(m, T) {
+  let cur = Math.max(0, T.items.findIndex(it => !(String(it.id) in T.answers)));
+  if (cur < 0 || T.revealed) cur = 0;
+  const player = new Audio();
+  let which = null;
+  const card = h("div", { class: "card" });
+  const top = h("div", { class: "row", style: "justify-content:space-between;align-items:center" });
+  m.append(top, card);
+  const back = h("button", { class: "btn small", type: "button", onclick: () => { player.pause(); store.set("listen.test", null); go("listen"); } }, "← 所有测试");
+  function play(k) {
+    const it = T.items[cur], url = k === "o" ? it.o : it[k];
+    if (!url) return;
+    if (which === k && !player.paused) { player.pause(); render(); return; }
+    player.src = url; player.play(); which = k; render();
+  }
+  player.addEventListener("ended", () => { which = null; render(); });
+  async function choose(c) {
+    const it = T.items[cur];
+    T = await api(`/api/listen/tests/${T.id}/answer`, { item: it.id, choice: c });
+    if (cur < T.items.length - 1) { cur++; player.pause(); which = null; }
+    render();
+  }
+  async function reveal() {
+    const left = T.items.length - Object.keys(T.answers).length;
+    if (left && !confirm(`还有 ${left} 句没答，现在揭晓？揭晓后仍可改答案，但已经知道哪个是哪个了。`)) return;
+    T = await api(`/api/listen/tests/${T.id}/reveal`); render();
+  }
+  function render() {
+    const it = T.items[cur], ans = T.answers[String(it.id)];
+    const done = Object.keys(T.answers).length;
+    top.innerHTML = "";
+    top.append(back, h("b", {}, T.title), h("span", { class: "muted" }, `已答 ${done} / ${T.items.length}`),
+      T.revealed ? null : h("button", { class: "btn", type: "button", onclick: reveal }, ico("check"), "揭晓结果"));
+    card.innerHTML = "";
+    const dots = h("div", { class: "lt-dots" }, T.items.map((x, i) => h("span", {
+      class: (String(x.id) in T.answers ? "done" : "") + (i === cur ? " cur" : ""), title: x.text || "",
+      onclick: () => { cur = i; player.pause(); which = null; render(); } }, x.id)));
+    const b = (k, label, key) => h("button", { class: "btn" + (which === k ? " on" : ""), type: "button", disabled: k === "o" && !it.o, onclick: () => play(k) },
+      ico("play"), label, h("span", { class: "lt-kbd" }, key));
+    const pick = (c, label, key) => h("button", { class: "btn" + (ans === c ? " picked" : ""), type: "button", onclick: () => choose(c) }, label, h("span", { class: "lt-kbd" }, key));
+    card.append(dots,
+      h("div", { style: "margin-top:6px" }, h("b", {}, `第 ${it.id} 句　`), it.text || ""),
+      it.source_text ? h("div", { class: "muted", style: "font-size:13px" }, "原文：" + it.source_text) : null,
+      h("div", { class: "lt-play" }, b("o", "原句", "O"), b("x", "X", "X"), b("y", "Y", "Y")),
+      h("div", { class: "hint", style: "margin-bottom:8px" }, "哪个更像原说话人在说中文（音色、语气、节奏都算）？"),
+      h("div", { class: "lt-choose" }, pick("x", "X 更像", "1"), pick("same", "差不多", "2"), pick("y", "Y 更像", "3")),
+      h("div", { class: "row", style: "margin-top:12px;justify-content:space-between" },
+        h("button", { class: "btn small", type: "button", disabled: cur === 0, onclick: () => { cur--; player.pause(); which = null; render(); } }, "← 上一句"),
+        h("span", { class: "muted", style: "font-size:12px" }, "快捷键：O / X / Y 播放，1 / 2 / 3 选择，← → 换句"),
+        h("button", { class: "btn small", type: "button", disabled: cur === T.items.length - 1, onclick: () => { cur++; player.pause(); which = null; render(); } }, "下一句 →")));
+    if (T.revealed) card.append(listenResult(T));
+  }
+  const onKey = e => {
+    if (e.target.matches("input, textarea, select")) return;
+    const k = e.key.toLowerCase();
+    if (k === "o" || k === "x" || k === "y") play(k);
+    else if (k === "1") choose("x"); else if (k === "2") choose("same"); else if (k === "3") choose("y");
+    else if (e.key === "ArrowLeft" && cur > 0) { cur--; player.pause(); which = null; render(); }
+    else if (e.key === "ArrowRight" && cur < T.items.length - 1) { cur++; player.pause(); which = null; render(); }
+    else return;
+    e.preventDefault();
+  };
+  document.addEventListener("keydown", onKey);
+  window.__pageCleanup = () => { document.removeEventListener("keydown", onKey); player.pause(); };
+  render();
+}
+
+function listenResult(T) {
+  const t = T.tally, A = T.labels.a, B = T.labels.b;
+  const verdict = t.a + t.b === 0 ? "还没有分出胜负的回答" :
+    t.p < 0.05 ? `「${t.a > t.b ? A : B}」更像，差距不太可能是巧合（p = ${t.p}）` :
+    `目前看不出谁更好：这样的差距纯靠巧合出现的概率有 ${Math.round(t.p * 100)}%（p = ${t.p}），可以多听几句再判断`;
+  const name = (it, c) => c === "same" ? "差不多" : ((c === "x") === (it.x_is === "a") ? A : B);
+  return h("div", { style: "margin-top:18px;border-top:1px solid var(--line);padding-top:12px" },
+    h("h3", {}, ico("report"), "结果"),
+    h("div", { style: "font-size:15px;margin-bottom:6px" }, h("b", {}, `${A} ${t.a}`), " : ", h("b", {}, `${B} ${t.b}`), `　差不多 ${t.same}　未答 ${t.n - t.answered}`),
+    h("div", { class: "hint" }, verdict),
+    h("div", { class: "hint" }, `A = ${T.a.title || T.a.project}（${T.a.project}）　B = ${T.b.title || T.b.project}（${T.b.project}）`),
+    h("table", { style: "width:100%;margin-top:8px;font-size:13px" },
+      h("tr", {}, h("th", { style: "text-align:left" }, "句"), h("th", { style: "text-align:left" }, "X 是"), h("th", { style: "text-align:left" }, "你的选择"), h("th", { style: "text-align:left" }, "译文")),
+      T.items.map(it => { const c = T.answers[String(it.id)]; return h("tr", {}, h("td", {}, it.id), h("td", {}, it.x_is === "a" ? A : B),
+        h("td", {}, c ? name(it, c) : "—"), h("td", { class: "muted" }, (it.text || "").slice(0, 40))); })));
+}
+
 function refPicker(title, hint) {
   let file = null, rec = "";
   const t1 = h("div", { class: "t1" }, title), t2 = h("div", { class: "t2" }, hint);
@@ -2425,6 +2576,8 @@ async function renderDubProject(m, pid) {
       dubSlider(st, "dynamics_range_db", "响度起伏上限 (dB)", 0, 12, 1, v => "±" + v, "比原片中位响度高 / 低多少以内照搬", remix));
   if (P.segments.some(x => (x.src_pauses || []).length))
     natural.prepend(dubCheck(st, "source_pauses", "句内停顿跟随原句（放在译文对应的逗号处）", remix));
+  if (Object.keys(P.acoustics || {}).length)
+    natural.prepend(dubCheck(st, "match_tone", "音色平衡对齐原片：自动 EQ 到原说话人的频谱（100 Hz – 10 kHz，最多 ±6 dB）", remix));
   const spks = Object.entries(P.speakers || {});
   const voiceRef = spks.length
     ? h("div", { class: "field" }, h("label", {}, spks.length > 1 ? `音色：${spks.length} 位说话人各自克隆` : "音色参考 A（取自原声）"),

@@ -261,7 +261,8 @@ def analyze_source(sentences: List[Dict], audio: Path, out_dir: Path, cfg: Optio
     as they are).  Returns ``{"sentences": [{"start", "end" (aligned), "speaker",
     "spk", "line", "line_check", "expr", "src_level", "src_pauses", "src_spread",
     "src_f0"}], "speakers": {"S1": {"ref", "lines", "f0"}}}``; paths are absolute
-    strings, ``spk`` / ``line`` are None when not produced."""
+    strings, ``spk`` / ``line`` are None when not produced; ``"acoustics": {"S1":
+    {"bands", "decay"}}`` the speakers' tonal balance (:func:`.acoustics.profile`)."""
     from ..audio.io import load_audio
     from . import linerefs
 
@@ -271,7 +272,7 @@ def analyze_source(sentences: List[Dict], audio: Path, out_dir: Path, cfg: Optio
              and s["end"] > s["start"]]
     res: List[Dict] = [{} for _ in sentences]
     if not timed:
-        return {"sentences": res, "speakers": {}}
+        return {"sentences": res, "speakers": {}, "acoustics": {}}
     y = load_audio(audio, REF_SR)
     y16 = load_audio(audio, AN_SR)
     total = len(y) / REF_SR
@@ -319,6 +320,17 @@ def analyze_source(sentences: List[Dict], audio: Path, out_dir: Path, cfg: Optio
     expr = [expressiveness(s, refs[k]) for s, k in zip(stats, speakers)]
     levels = [s["level"] if s["level"] is not None else -90.0 for s in stats]
 
+    # each speaker's tonal balance / room decay at full bandwidth (:mod:`.acoustics`)
+    from . import acoustics
+
+    y48 = load_audio(audio, acoustics.SR)
+    acoustic: Dict[str, Dict] = {}
+    for spk in set(speakers):
+        clips = [y48[int(a * acoustics.SR):int(b * acoustics.SR)]
+                 for (a, b), k, st in zip(spans, speakers, stats) if k == spk and not st.get("event")]
+        if clips:
+            acoustic[spk] = acoustics.profile(clips, acoustics.SR)
+    del y48
     spk_info: Dict[str, Dict] = {}
     if voice_refs:
         for spk in sorted(set(speakers), key=lambda k: int(k[1:])):
@@ -362,7 +374,7 @@ def analyze_source(sentences: List[Dict], audio: Path, out_dir: Path, cfg: Optio
     log.info("source analysis: %d line(s) (%d sound events, %d aligned), %d speaker(s), %d line reference(s)",
              len(timed), sum(events), sum(a is not None for a in aligned), len(set(speakers)),
              sum(1 for x in lines if x.get("line")))
-    return {"sentences": res, "speakers": spk_info}
+    return {"sentences": res, "speakers": spk_info, "acoustics": acoustic}
 
 
 # ------------------------------------------------------------------ pauses in the dub

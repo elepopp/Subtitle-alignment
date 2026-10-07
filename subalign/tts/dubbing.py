@@ -92,6 +92,17 @@ class DubConfig:
     pace: bool = True
     pace_min: float = 0.82
     pace_max: float = 1.05
+    # IndexTTS's acoustic renderer: guidance strength (how closely it follows the voice
+    # reference) and diffusion steps.  1.0 / 50 (library: 0.7 / 25) was closer to the
+    # speaker on all of 8 test sentences (similarity +0.026), ~1.5x the time
+    render_cfg: float = 1.0
+    render_steps: int = 50
+    # every speaker's sentences get an EQ that brings the finished dub's tonal balance
+    # (after the de-mechanising chain) to the original speaker's (:mod:`.acoustics`),
+    # 100 Hz - 10 kHz, at most ``tone_max_db``.  No room reverb: the originals measured
+    # fairly dry, and matching their decay with reverb lowered the voice similarity
+    match_tone: bool = False
+    tone_max_db: float = 6.0
     # sentence loudness follows the original line (offset from the median, capped)
     # instead of being evened out
     follow_dynamics: bool = False
@@ -202,7 +213,7 @@ def _now() -> float:
 
 def create_project(pdir: Path, script: str, spk: Path, emo: Optional[Path], cfg: DubConfig, title: str = "",
                    sentences: Optional[List[Dict]] = None, source: Optional[Dict] = None,
-                   speakers: Optional[Dict] = None) -> Dict:
+                   speakers: Optional[Dict] = None, acoustics: Optional[Dict] = None) -> Dict:
     """``script``: the text, raw or already reviewed (markup allowed).  It is always
     normalised (idempotent), so notes / emoji / digits never reach the engine.
 
@@ -220,7 +231,7 @@ def create_project(pdir: Path, script: str, spk: Path, emo: Optional[Path], cfg:
         script = "\n".join(s["text"] for s in segs)
     proj = {"version": 1, "title": title or "AI 配音", "created": _now(), "spk": str(spk), "emo": str(emo) if emo else None,
             "script": script, "config": asdict(cfg), "mix": None, "final": None, "source": source,
-            "speakers": speakers or {},
+            "speakers": speakers or {}, "acoustics": acoustics or {},
             "segments": [dict(s, id=i + 1, status="pending", audio=None, takes=[], qa=None) for i, s in enumerate(segs)]}
     save(pdir, proj)
     return proj
@@ -333,11 +344,19 @@ _ASR = {}
 
 
 def asr_backend():
-    """The recogniser used to check takes and reference clips (loaded once)."""
+    """The recogniser used to check takes and reference clips (loaded once), 8-bit.  In
+    float16 next to the IndexTTS worker (~8.7 GB) it filled an 11 GB card and generation
+    slowed from ~6 s to over 100 s a sentence as Windows paged GPU memory; 8-bit takes
+    ~1.1 GB (0.3 s a check, generation unaffected).  On the CPU (7 s a check, whatever
+    the length: Whisper always encodes 30 s) only when the GPU has no room for it."""
     from ..asr import get_backend
+    from .linerefs import _device_for
 
     if "asr" not in _ASR:
-        _ASR["asr"] = get_backend("faster-whisper", model="large-v3-turbo")
+        dev = _device_for(min_free_gb=1.5)
+        _ASR["asr"] = get_backend("faster-whisper", model="large-v3-turbo", device=dev,
+                                  compute_type="int8_float16" if dev == "cuda" else "int8")
+        log.info("take check (Whisper) on %s", dev)
     return _ASR["asr"]
 
 
@@ -611,7 +630,8 @@ def synth_segment(pdir: Path, sid: int, worker: Optional[TTSWorker] = None) -> D
             r = worker.request(cmd="synth", text=tts_text, spk=spk, emo=emo,
                                emo_alpha=alpha, duration_factor=round(1 / max(0.5, min(2.0, cfg.speed)), 4),
                                seed=seed, out=str(out), lang=cfg.lang, timbre=timbre, target=target,
-                               pace_range=[cfg.pace_min, cfg.pace_max])
+                               pace_range=[cfg.pace_min, cfg.pace_max], cfg_rate=cfg.render_cfg,
+                               steps=cfg.render_steps)
             take = {"file": f"seg/{out.name}", "seed": seed, "duration": r.get("duration"), "seconds": r.get("seconds"),
                     "text": text, "emo_alpha": alpha if emo else None, "timbre": bool(timbre),
                     "target": target, "natural": r.get("natural"), "pace": r.get("pace")}
@@ -694,6 +714,7 @@ def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
         target = float(np.median([l for l in louds if l > -60] or [-23]))
         gains = [max(-6, min(6, target - l)) if l > -60 else 0.0 for l in louds]
     clips = [c * 10 ** (g / 20) for c, g in zip(clips, gains)]
+    eq_db = match_tone(clips, segs, proj, cfg) if cfg.match_tone else {}
     peak = max(float(np.max(np.abs(c))) if len(c) else 0.0 for c in clips)
     if peak > 0.95:                     # loud lines lifted: scale everything, keep the contrast
         clips = [c * (0.95 / peak) for c in clips]
@@ -725,7 +746,7 @@ def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
         y, timing = _place_on_timeline(clips, segs, cfg, breaths)
         for t, g, n_p in zip(timing, gains, placed_pauses):
             t.update(gain_db=round(g, 1), pauses=n_p)
-        return _finish(pdir, proj, y, timing, cfg, tone_lvl, out)
+        return _finish(pdir, proj, y, timing, cfg, tone_lvl, out, tone_eq=eq_db)
     parts: List[np.ndarray] = [np.zeros(int(0.25 * SR), np.float32)]
     timing = []
     t = len(parts[0])
@@ -744,7 +765,30 @@ def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
         parts.append(c)
         t += len(c)
     parts.append(np.zeros(int(0.4 * SR), np.float32))
-    return _finish(pdir, proj, np.concatenate(parts), timing, cfg, tone_lvl, out)
+    return _finish(pdir, proj, np.concatenate(parts), timing, cfg, tone_lvl, out, tone_eq=eq_db)
+
+
+def match_tone(clips: List[np.ndarray], segs: List[Dict], proj: Dict, cfg: DubConfig) -> Dict[str, List[float]]:
+    """EQ every speaker's clips (in place) toward the original speaker's tonal balance,
+    measured on the clips as the de-mechanising chain will leave them.  Returns the
+    band gains used per speaker."""
+    from . import acoustics
+
+    targets = proj.get("acoustics") or {}
+    used: Dict[str, List[float]] = {}
+    for spk in sorted({s.get("speaker") or "S1" for s in segs}):
+        prof = targets.get(spk) or (next(iter(targets.values())) if len(targets) == 1 else None)
+        idx = [i for i, s in enumerate(segs) if (s.get("speaker") or "S1") == spk]
+        if not prof or not idx:
+            continue
+        gap = np.zeros(int(0.4 * SR), np.float32)
+        joined = np.concatenate([c for i in idx for c in (clips[i], gap)])
+        now = acoustics.band_levels(naturalize(joined, cfg), SR)
+        g = acoustics.eq_gains(np.array(prof["bands"]), now, max_db=cfg.tone_max_db)
+        for i in idx:
+            clips[i] = acoustics.apply_eq(clips[i], SR, g)
+        used[spk] = [round(float(x), 1) for x in g]
+    return used
 
 
 def fit_factor(length: float, slot: float, natural: float, cfg: DubConfig, paced: bool = False) -> float:
@@ -792,7 +836,7 @@ def _place_on_timeline(clips: List[np.ndarray], segs: List[Dict], cfg: DubConfig
 
 
 def _finish(pdir: Path, proj: Dict, y: np.ndarray, timing: List[Dict], cfg: DubConfig, tone_lvl: float,
-            out: Optional[Path]) -> Dict:
+            out: Optional[Path], tone_eq: Optional[Dict] = None) -> Dict:
     from ..audio.io import save_audio
 
     if tone_lvl:
@@ -805,7 +849,7 @@ def _finish(pdir: Path, proj: Dict, y: np.ndarray, timing: List[Dict], cfg: DubC
     out = out or pdir / "mix.wav"
     save_audio(out, np.clip(y, -1, 1), SR)
     mix = {"file": out.name, "built": _now(), "duration": round(len(y) / SR, 2), "timing": timing,
-           "missing": [s["id"] for s in proj["segments"] if not s.get("audio")]}
+           "missing": [s["id"] for s in proj["segments"] if not s.get("audio")], "tone_eq": tone_eq or {}}
     update(pdir, lambda p: p.update(mix=mix))
     return mix
 
