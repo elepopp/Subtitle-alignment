@@ -19,9 +19,9 @@ What makes AI speech sound less synthetic (``naturalize``):
   "air" a 22 kHz model cannot produce (nothing above 11 kHz otherwise)
 * a little harmonic warmth (soft saturation)
 * emphasised words (<重|...>) are located with CTC and lifted a few dB
-For a translated dub with the original recording (:mod:`.expressive`) each sentence
-takes its emotion from its original line, each speaker keeps their own voice, and
-loudness and in-sentence pauses follow the original instead of being evened out.
+For a translated dub with the original recording (:mod:`.expressive`, :mod:`.linerefs`)
+each sentence is generated from its own original line, and loudness and in-sentence
+pauses follow the original instead of being evened out.
 Then the regular voice-over chain (:mod:`subalign.studio`) runs: EQ, de-ess,
 compression, optional reverb / BGM, loudness, export.
 """
@@ -71,17 +71,22 @@ class DubConfig:
     timeline: bool = False
     max_stretch: float = 1.15
     min_stretch: float = 0.93
-    # translated dub with the original recording (:mod:`.expressive`): every sentence uses
-    # its own original line as the emotion reference, weighted between ``emo_floor`` (a
-    # calm line) and ``emo_alpha`` (the most expressive); each speaker has their own voice
-    source_emo: bool = False
-    emo_floor: float = 0.45
+    # translated dub with the original recording (:mod:`.linerefs`): every sentence is
+    # generated from its own original line (aligned, cut in the gaps, checked by ear) as
+    # the only reference - voice and delivery both come from it, no separate emotion
+    # reference (IndexTTS-2.5 adds the emotion vector to the speaker embedding, so a
+    # second reference moved the timbre and made the Chinese dub ~3 semitones higher)
+    line_ref: bool = False
     # sentence loudness follows the original line (offset from the median, capped)
     # instead of being evened out
     follow_dynamics: bool = False
     dynamics_range_db: float = 8.0
     # pauses inside an original line are re-placed at the matching clause boundary
     source_pauses: bool = False
+    # several takes per sentence, ranked by misreading, voice similarity, closeness to
+    # the original line's performance and fit on the timeline (:mod:`.takeqa`)
+    pick_best: bool = False
+    candidates: int = 2
 
 
 # ------------------------------------------------------------------ engine worker
@@ -206,7 +211,7 @@ def create_project(pdir: Path, script: str, spk: Path, emo: Optional[Path], cfg:
     return proj
 
 
-EXPR_KEYS = ("speaker", "spk", "emo", "expr", "src_level", "src_pauses")
+EXPR_KEYS = ("speaker", "spk", "line", "line_check", "expr", "src_level", "src_pauses", "src_spread", "src_f0")
 
 
 def _timed_segments(sentences: List[Dict], lang: str) -> List[Dict]:
@@ -312,15 +317,21 @@ def _units(text: str, lang: str) -> List[str]:
 _ASR = {}
 
 
-def check_take(path: Path, text: str, lang: str = "zh") -> Dict:
-    """Transcribe a take and compare with the intended text: character (CJK) / word
-    error rate where a homophone (same reading, other character) counts as correct."""
-    from ..align.sequence import align_keys
+def asr_backend():
+    """The recogniser used to check takes and reference clips (loaded once)."""
     from ..asr import get_backend
 
     if "asr" not in _ASR:
         _ASR["asr"] = get_backend("faster-whisper", model="large-v3-turbo")
-    tr = _ASR["asr"].transcribe(str(path), language=lang, vad=False)
+    return _ASR["asr"]
+
+
+def check_take(path: Path, text: str, lang: str = "zh") -> Dict:
+    """Transcribe a take and compare with the intended text: character (CJK) / word
+    error rate where a homophone (same reading, other character) counts as correct."""
+    from ..align.sequence import align_keys
+
+    tr = asr_backend().transcribe(str(path), language=lang, vad=False)
     joiner = "" if textprep.is_cjk_lang(lang) else " "
     heard = joiner.join(s.text.strip() for s in tr.segments)
     # whisper writes numbers as digits: read them out the same way as the script
@@ -492,31 +503,63 @@ def _resample(y: np.ndarray, a: int, b: int) -> np.ndarray:
 
 
 # ------------------------------------------------------------------ synthesis
+def config(proj: Dict) -> DubConfig:
+    """The project's settings (keys of older versions ignored)."""
+    return DubConfig(**{k: v for k, v in proj["config"].items() if k in DubConfig.__dataclass_fields__})
+
+
+def speaker_ref(proj: Dict, seg: Dict) -> str:
+    """The sentence's speaker's voice reference (the project's voice without one)."""
+    return seg["spk"] if seg.get("spk") and Path(seg["spk"]).exists() else proj["spk"]
+
+
 def references(proj: Dict, seg: Dict, cfg: DubConfig) -> tuple:
-    """(voice reference, emotion reference, emotion weight) for one sentence: its
-    speaker's voice and its own original line when the project has them."""
-    spk = seg.get("spk") if seg.get("spk") and Path(seg["spk"]).exists() else proj["spk"]
-    if cfg.source_emo and seg.get("emo") and Path(seg["emo"]).exists():
-        hi = cfg.emo_alpha
-        lo = min(cfg.emo_floor, hi)
-        return spk, seg["emo"], round(lo + (hi - lo) * float(seg.get("expr") or 0.0), 3)
-    return spk, proj.get("emo"), cfg.emo_alpha
+    """(voice reference, emotion reference, emotion weight) for one sentence: its own
+    original line when the project uses line references (IndexTTS then takes the
+    delivery from it too), else its speaker's voice + the project's emotion reference."""
+    if cfg.line_ref and seg.get("line") and Path(seg["line"]).exists():
+        return seg["line"], None, cfg.emo_alpha
+    return speaker_ref(proj, seg), proj.get("emo"), cfg.emo_alpha
+
+
+def _err(take: Dict) -> Optional[float]:
+    return (take.get("qa") or {}).get("error")
+
+
+def _best_take(takes: List[Dict], ranked: bool) -> Dict:
+    """Lowest ``score.total`` when ranked, else the fewest misread characters (a take
+    that could not be checked only wins when no take was checked)."""
+    if ranked and all(t.get("score") for t in takes):
+        return min(takes, key=lambda t: t["score"]["total"])
+    checked = [t for t in takes if _err(t) is not None]
+    return min(checked, key=_err) if checked else takes[0]
 
 
 def synth_segment(pdir: Path, sid: int, worker: Optional[TTSWorker] = None) -> Dict:
-    """(Re)generate one sentence; with QA it tries up to ``max_tries`` seeds and keeps
-    the take with the fewest misread characters."""
+    """(Re)generate one sentence.  With QA it tries up to ``max_tries`` seeds until a
+    take reads correctly; with ``pick_best`` at least ``candidates`` takes are made and
+    the best by :mod:`.takeqa` is kept (still up to ``max_tries`` while none reads
+    correctly)."""
+    from . import takeqa
+
     worker = worker or WORKER
     proj = update(pdir, lambda p: find(p, sid).update(status="running"))
-    cfg = DubConfig(**proj["config"])
+    cfg = config(proj)
     seg = find(proj, sid)
     text, tts_text = seg["text"], seg["tts_text"]
     spk, emo, alpha = references(proj, seg, cfg)
+    voice = speaker_ref(proj, seg)          # what a take is compared with for voice drift
+    ranked = cfg.pick_best
+    at_least = max(1, int(cfg.candidates)) if ranked else 1
+    tries = max(at_least, cfg.max_tries if cfg.qa else 1)
+    slot = None
+    if ranked and cfg.timeline:
+        i = proj["segments"].index(seg)
+        slot = takeqa.slot_for(seg, proj["segments"][i + 1] if i + 1 < len(proj["segments"]) else None)
     (pdir / "seg").mkdir(exist_ok=True)
     takes: List[Dict] = []
-    best = None
     try:
-        for _ in range(max(1, cfg.max_tries if cfg.qa else 1)):
+        for k in range(tries):
             seed = random.randint(1, 2 ** 31 - 1)
             out = pdir / "seg" / f"{sid:04d}_{int(time.time() * 1000) % 10 ** 9:09d}.wav"
             r = worker.request(cmd="synth", text=tts_text, spk=spk, emo=emo,
@@ -530,13 +573,17 @@ def synth_segment(pdir: Path, sid: int, worker: Optional[TTSWorker] = None) -> D
                 except Exception as e:
                     log.warning("QA failed: %s", e)
                     take["qa"] = {"error": None, "heard": f"(校验失败: {e})"}
+            if ranked:
+                try:
+                    m = takeqa.measure(out, seg, voice, performance=cfg.line_ref, slot=slot)
+                    take["measure"] = m
+                    take["score"] = takeqa.score(m, seg, _err(take), cfg.max_error, cfg.max_stretch)
+                except Exception as e:
+                    log.warning("take scoring failed: %s", e)
             takes.append(take)
-            err = (take.get("qa") or {}).get("error")
-            best_err = (best or {}).get("qa", {}) or {}
-            if best is None or (err is not None and (best_err.get("error") is None or err < best_err["error"])):
-                best = take
-            if err is None or err <= cfg.max_error:
+            if k + 1 >= at_least and any(_err(t) is None or _err(t) <= cfg.max_error for t in takes):
                 break
+        best = _best_take(takes, ranked)
     except Exception as e:
         def failed(p):
             s = find(p, sid)
@@ -549,6 +596,7 @@ def synth_segment(pdir: Path, sid: int, worker: Optional[TTSWorker] = None) -> D
         s = find(p, sid)
         s["takes"] = s.get("takes", []) + takes
         s["audio"], s["qa"], s["error"] = best["file"], best.get("qa"), None
+        s["measure"], s["score"] = best.get("measure"), best.get("score")
         bad = cfg.qa and (s["qa"] or {}).get("error") is not None and s["qa"]["error"] > cfg.max_error
         s["status"] = "edited" if s["text"] != text else ("check" if bad else "done")
         s["updated"] = _now()
@@ -561,13 +609,14 @@ def use_take(pdir: Path, sid: int, file: str) -> Dict:
         s = find(p, sid)
         t = next(t for t in s.get("takes", []) if t["file"] == file)
         s["audio"], s["qa"], s["status"] = t["file"], t.get("qa"), "done"
+        s["measure"], s["score"] = t.get("measure"), t.get("score")
     return find(update(pdir, fn), sid)
 
 
 def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
     """Takes -> one natural-sounding voice track (48 kHz) + per-sentence timing.  With
     ``timeline`` (a translated dub) sentences sit at the original times instead."""
-    cfg = DubConfig(**{k: v for k, v in proj["config"].items() if k in DubConfig.__dataclass_fields__})
+    cfg = config(proj)
     rng = np.random.default_rng(int(proj.get("created", 7)) % 2 ** 32)
     segs = [s for s in proj["segments"] if s.get("audio")]
     if not segs:
@@ -609,7 +658,7 @@ def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
     # breaths of each sentence's own speaker (their voice reference)
     breaths: List[List[np.ndarray]] = [[] for _ in segs]
     if cfg.breaths:
-        refs = [references(proj, s, cfg)[0] for s in segs]
+        refs = [speaker_ref(proj, s) for s in segs]
         found = {r: harvest_breaths(Path(r)) for r in set(refs)}
         if any(found.values()):
             # a breath sits ~24 dB under the voice (the sentences were loudness-matched, the

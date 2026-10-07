@@ -4,18 +4,17 @@ voice-over instead of reading every line in one tone.
 From the original recording (its vocals stem when the recognition separated one)
 and the sentence timing of a dubbing translation:
 
+* **where the lines really are** - subtitle timing is forced-aligned to the audio
+  (:mod:`.linerefs`); everything below is measured on the aligned spans
+* **per-line voice reference** - every line's own original audio, cut in the gaps
+  to its neighbours and checked by ear (Whisper), as the reference its dubbed
+  sentence is generated from (:mod:`.linerefs`)
 * **speakers** - the recognition's speaker labels, or a quick sentence-level
-  diarisation (CAM++ embeddings + clustering); every speaker gets a voice
-  reference of their own, cut from their calmest lines (an emotional line as the
-  *identity* reference drags its emotion into every sentence)
-* **per-sentence emotion reference** - the original line itself (widened to at
-  least ``min_emo_s`` with the same speaker's surroundings): IndexTTS-2.5 takes
-  identity and emotion from separate references, so the line's energy, tension and
-  pace carry over without a text label
+  diarisation (CAM++ embeddings + clustering); every speaker also gets a voice
+  reference of their own, cut from their calmest lines: the fallback for lines
+  without a usable clip, and what takes are compared with for voice drift
 * **expressiveness** (0-1) - how far the line departs from the speaker's usual
-  level, pitch and pitch movement.  Calm lines get a weak emotion weight (a source
-  language reference applied at full strength leaks its intonation), strong ones a
-  high weight
+  level, pitch and pitch movement (picks the calm lines for the voice reference)
 * **level** - the line's active speech level, so the dub can follow the original's
   loud / quiet lines instead of flattening them
 * **pauses** - silences inside the line (hesitation, a beat before the point), to
@@ -43,8 +42,6 @@ AN_SR = 16000           # analysis
 class ExprConfig:
     diarize: bool = True            # tell speakers apart when the recognition did not
     n_speakers: Optional[int] = None
-    min_emo_s: float = 1.5          # shorter lines are widened with their surroundings
-    max_emo_s: float = 12.0
     spk_target_s: float = 12.0      # voice reference length per speaker (IndexTTS reads ~15 s)
     min_pause: float = 0.3          # silences inside a line that count as a pause
     min_speaker_s: float = 4.0      # a "speaker" with less speech is merged into the nearest one
@@ -232,29 +229,6 @@ def _save(path: Path, y: np.ndarray) -> str:
     return str(path)
 
 
-def _emo_window(i: int, spans: List[Tuple[float, float]], speakers: List[str], total: float,
-                cfg: ExprConfig) -> Tuple[float, float]:
-    """The line itself with a little air; a short line grows into its surroundings,
-    never into another speaker's line."""
-    a, b = spans[i]
-    a, b = max(0.0, a - 0.08), min(total, b + 0.12)
-    if b - a < cfg.min_emo_s:
-        lo, hi = 0.0, total
-        for j, (c, d) in enumerate(spans):
-            if j == i or speakers[j] == speakers[i]:
-                continue
-            if d <= spans[i][0]:
-                lo = max(lo, d + 0.05)
-            elif c >= spans[i][1]:
-                hi = min(hi, c - 0.05)
-        need = cfg.min_emo_s - (b - a)
-        a2 = max(lo, a - need / 2)
-        b2 = min(hi, b + need - (a - a2))           # what the left side could not take goes right
-        if b2 - a2 < cfg.min_emo_s:
-            a2 = max(lo, b2 - cfg.min_emo_s)
-        a, b = min(a, a2), max(b, b2)
-    return a, min(b, a + cfg.max_emo_s)
-
 
 def _pick_voice(idx: List[int], spans, expr: List[float], levels: List[float], target: float,
                 calm: float = 0.35, enough: float = 6.0) -> List[int]:
@@ -277,16 +251,22 @@ def _pick_voice(idx: List[int], spans, expr: List[float], levels: List[float], t
 
 
 def analyze_source(sentences: List[Dict], audio: Path, out_dir: Path, cfg: Optional[ExprConfig] = None,
-                   voice_refs: bool = True, emo_refs: bool = True) -> Dict:
+                   voice_refs: bool = True, line_refs: bool = True, lang: Optional[str] = None,
+                   line_cfg=None, asr=None) -> Dict:
     """Per-sentence performance data + reference files under ``out_dir``.
 
-    ``sentences``: ``[{"start", "end", "speaker"?}]`` (lines without timing get an
-    empty entry).  Returns ``{"sentences": [{"speaker", "spk", "emo", "expr",
-    "src_level", "src_pauses"}], "speakers": {"S1": {"ref", "lines"}}}``; paths are
-    absolute strings, ``spk`` / ``emo`` are None when not produced."""
+    ``sentences``: ``[{"start", "end", "speaker"?, "source_text"?}]`` (lines without
+    timing get an empty entry); ``lang``: the language of the original, for aligning
+    and checking the lines (:mod:`.linerefs`; without it the subtitle times are used
+    as they are).  Returns ``{"sentences": [{"start", "end" (aligned), "speaker",
+    "spk", "line", "line_check", "expr", "src_level", "src_pauses", "src_spread",
+    "src_f0"}], "speakers": {"S1": {"ref", "lines", "f0"}}}``; paths are absolute
+    strings, ``spk`` / ``line`` are None when not produced."""
     from ..audio.io import load_audio
+    from . import linerefs
 
     cfg = cfg or ExprConfig()
+    lcfg = line_cfg or linerefs.LineRefConfig()
     timed = [i for i, s in enumerate(sentences) if s.get("start") is not None and s.get("end") is not None
              and s["end"] > s["start"]]
     res: List[Dict] = [{} for _ in sentences]
@@ -296,7 +276,17 @@ def analyze_source(sentences: List[Dict], audio: Path, out_dir: Path, cfg: Optio
     y16 = load_audio(audio, AN_SR)
     total = len(y) / REF_SR
     spans = [(float(sentences[i]["start"]), float(min(sentences[i]["end"], total))) for i in timed]
-    events = [is_event(sentences[i].get("source_text") or sentences[i].get("text")) for i in timed]
+    texts = [sentences[i].get("source_text") or sentences[i].get("text") or "" for i in timed]
+    events = [is_event(t) for t in texts]
+    # where the words really are (subtitle timing is often off): everything below is
+    # measured on these spans
+    aligned: List[Optional[Tuple[float, float]]] = [None] * len(spans)
+    if lang:
+        try:
+            aligned = linerefs.refine_spans(spans, ["" if e else t for t, e in zip(texts, events)], y16, lang, lcfg)
+        except Exception as e:          # no alignment model for the language, no torch ...
+            log.warning("line alignment skipped: %s", e)
+    spans = [a or s for a, s in zip(aligned, spans)]
     speakers = assign_speakers(spans, [sentences[i].get("speaker") for i in timed], y16, cfg, events)
 
     stats = []
@@ -347,18 +337,31 @@ def analyze_source(sentences: List[Dict], audio: Path, out_dir: Path, cfg: Optio
             ref = np.concatenate(parts[:-1])[:int(15 * REF_SR)]
             if len(ref) < REF_SR * 1.0:
                 continue
-            spk_info[spk] = {"ref": _save(out_dir / f"voice_{spk}.wav", ref), "lines": len(idx),
-                             "seconds": round(len(ref) / REF_SR, 1)}
+            path = _save(out_dir / f"voice_{spk}.wav", ref)
+            spk_info[spk] = {"ref": path, "lines": len(idx), "seconds": round(len(ref) / REF_SR, 1),
+                             "f0": pitch_stats(load_audio(path, AN_SR))[0]}
+    lines: List[Dict] = [{} for _ in timed]
+    if line_refs:
+        usable = [not st.get("event") for st in stats]
+        lines = linerefs.build(spans, [a is not None for a in aligned], texts, speakers, usable, y, REF_SR, y16,
+                               lang, out_dir / "line", [f"{i + 1:04d}" for i in timed], lcfg, asr)
     for j, i in enumerate(timed):
-        r = {"speaker": speakers[j], "expr": expr[j], "src_level": None if stats[j].get("event") else round(levels[j], 2),
-             "src_pauses": stats[j]["pauses"], "spk": (spk_info.get(speakers[j]) or {}).get("ref"), "emo": None}
-        if emo_refs and not stats[j].get("event"):
-            a, b = _emo_window(j, spans, speakers, total, cfg)
-            if b - a >= 0.4:
-                r["emo"] = _save(out_dir / "emo" / f"{i + 1:04d}.wav", y[int(a * REF_SR):int(b * REF_SR)])
+        st = stats[j]
+        # pitch height relative to the voice reference (the speaker's median without one),
+        # the same way a take is measured against its reference when takes are ranked
+        base = (spk_info.get(speakers[j]) or {}).get("f0")
+        if base is None:
+            base = refs[speakers[j]]["f0"][0]
+        r = {"start": round(spans[j][0], 3), "end": round(spans[j][1], 3), "speaker": speakers[j], "expr": expr[j],
+             "src_level": None if st.get("event") else round(levels[j], 2),
+             "src_pauses": st["pauses"], "spk": (spk_info.get(speakers[j]) or {}).get("ref"),
+             "line": lines[j].get("line"), "line_check": lines[j].get("line_check"),
+             "src_spread": None if st["spread"] is None else round(st["spread"], 2),
+             "src_f0": None if st["f0"] is None else round(st["f0"] - base, 2)}
         res[i] = r
-    log.info("expressive dub: %d line(s) (%d sound events), %d speaker(s), mean expressiveness %.2f",
-             len(timed), sum(events), len(set(speakers)), float(np.mean(expr)))
+    log.info("source analysis: %d line(s) (%d sound events, %d aligned), %d speaker(s), %d line reference(s)",
+             len(timed), sum(events), sum(a is not None for a in aligned), len(set(speakers)),
+             sum(1 for x in lines if x.get("line")))
     return {"sentences": res, "speakers": spk_info}
 
 
