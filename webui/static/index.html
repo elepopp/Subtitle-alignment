@@ -2417,7 +2417,8 @@ async function renderDubProject(m, pid) {
   // performance carried over from the original (translated dub with the original recording)
   const remix = async (k, v) => { await onset(k, v); act(base + "/assemble"); };
   if (P.segments.some(x => x.line))
-    voice.append(dubCheck(st, "line_ref", "每句用自己的原句做参考（之后生成的句子生效）", onset));
+    voice.append(dubCheck(st, "line_ref", "每句用自己的原句做参考（之后生成的句子生效）", onset),
+      dubCheck(st, "stable_timbre", "音色稳定：语气取自原句，音色取自说话人的整段音色参考", onset));
   if (P.segments.some(x => x.src_level != null))
     natural.prepend(dubCheck(st, "follow_dynamics", "响度跟随原句（不再拉平）", remix),
       dubSlider(st, "dynamics_range_db", "响度起伏上限 (dB)", 0, 12, 1, v => "±" + v, "比原片中位响度高 / 低多少以内照搬", remix));

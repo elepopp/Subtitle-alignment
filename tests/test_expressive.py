@@ -186,13 +186,18 @@ def test_per_sentence_references(tmp_path):
     w = FakeWorker()
     for sid in (1, 2, 3):
         dubbing.synth_segment(pdir, sid, w)
-    # every sentence is generated from its own original line, no separate emotion reference
+    # every sentence is generated from its own original line, no separate emotion reference,
+    # with the timbre rendered from the speaker's stable voice reference
     for c, a in zip(w.calls, ana["sentences"]):
-        assert c["spk"] == a["line"] and c["emo"] is None
+        assert c["spk"] == a["line"] and c["emo"] is None and c["timbre"] == a["spk"]
+    dubbing.set_config(pdir, stable_timbre=False)
+    dubbing.synth_segment(pdir, 1, w)
+    assert w.calls[-1]["spk"] == ana["sentences"][0]["line"] and w.calls[-1]["timbre"] is None
     # turned off: the speaker's voice reference
     dubbing.set_config(pdir, line_ref=False)
     dubbing.synth_segment(pdir, 2, w)
     assert w.calls[-1]["spk"] == ana["speakers"]["S2"]["ref"] and w.calls[-1]["emo"] is None
+    assert w.calls[-1]["timbre"] is None                  # the voice reference itself: nothing to split
     # an older project's settings (keys that no longer exist) still load
     dubbing.update(pdir, lambda p: p["config"].update(source_emo=True, emo_floor=0.45))
     dubbing.synth_segment(pdir, 1, w)

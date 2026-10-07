@@ -77,6 +77,11 @@ class DubConfig:
     # reference (IndexTTS-2.5 adds the emotion vector to the speaker embedding, so a
     # second reference moved the timbre and made the Chinese dub ~3 semitones higher)
     line_ref: bool = False
+    # ... while the timbre comes from the speaker's stable voice reference: IndexTTS's
+    # acoustic renderer (which largely decides the timbre) is conditioned on it, the
+    # language model (rhythm, tone) on the line (``timbre`` in ``webui/tts_worker.py``) -
+    # a short line alone as the reference made the voice drift (similarity 0.65 vs 0.75)
+    stable_timbre: bool = True
     # sentence loudness follows the original line (offset from the median, capped)
     # instead of being evened out
     follow_dynamics: bool = False
@@ -549,6 +554,7 @@ def synth_segment(pdir: Path, sid: int, worker: Optional[TTSWorker] = None) -> D
     text, tts_text = seg["text"], seg["tts_text"]
     spk, emo, alpha = references(proj, seg, cfg)
     voice = speaker_ref(proj, seg)          # what a take is compared with for voice drift
+    timbre = voice if cfg.line_ref and cfg.stable_timbre and spk != voice and Path(voice).exists() else None
     ranked = cfg.pick_best
     at_least = max(1, int(cfg.candidates)) if ranked else 1
     tries = max(at_least, cfg.max_tries if cfg.qa else 1)
@@ -564,9 +570,9 @@ def synth_segment(pdir: Path, sid: int, worker: Optional[TTSWorker] = None) -> D
             out = pdir / "seg" / f"{sid:04d}_{int(time.time() * 1000) % 10 ** 9:09d}.wav"
             r = worker.request(cmd="synth", text=tts_text, spk=spk, emo=emo,
                                emo_alpha=alpha, duration_factor=round(1 / max(0.5, min(2.0, cfg.speed)), 4),
-                               seed=seed, out=str(out), lang=cfg.lang)
+                               seed=seed, out=str(out), lang=cfg.lang, timbre=timbre)
             take = {"file": f"seg/{out.name}", "seed": seed, "duration": r.get("duration"), "seconds": r.get("seconds"),
-                    "text": text, "emo_alpha": alpha if emo else None}
+                    "text": text, "emo_alpha": alpha if emo else None, "timbre": bool(timbre)}
             if cfg.qa:
                 try:
                     take["qa"] = check_take(out, text, cfg.lang.lower())
