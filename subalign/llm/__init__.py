@@ -27,7 +27,7 @@ OPENAI_COMPATIBLE: Dict[str, tuple] = {
     "qwen": ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus", "DASHSCOPE_API_KEY"),
     "moonshot": ("https://api.moonshot.cn/v1", "moonshot-v1-8k", "MOONSHOT_API_KEY"),
     "zhipu": ("https://open.bigmodel.cn/api/paas/v4", "glm-4-plus", "ZHIPUAI_API_KEY"),
-    "ollama": ("http://localhost:11434/v1", "qwen2.5:7b", "OLLAMA_API_KEY"),
+    "ollama": ("http://localhost:11434/v1", "index-translate:9b-q5", "OLLAMA_API_KEY"),
     "custom": (None, None, "LLM_API_KEY"),
 }
 
