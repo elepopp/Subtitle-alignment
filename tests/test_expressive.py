@@ -1,4 +1,5 @@
 import shutil
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -131,13 +132,16 @@ def test_analyze_source(tmp_path):
     assert r[2]["src_level"] > r[0]["src_level"] + 8
     assert len(r[2]["src_pauses"]) == 1 and r[2]["src_pauses"][0]["at"] == pytest.approx(0.5, abs=0.05)
     assert r[0]["src_pauses"] == []
-    # every timed line has its own emotion reference; the 0.6 s line was widened
-    # (to the left only up to the end of S1's line before it)
+    # every timed line has its own reference clip; the 0.6 s S2 line is joined with S2's
+    # other line (never with S1's) to be long enough
     for x in r[:5]:
-        assert x["emo"] and (tmp_path / "ref" / "emo").exists()
-    short, _ = sf.read(r[4]["emo"])
-    assert len(short) / expressive.REF_SR >= 1.45
+        assert x["line"] and Path(x["line"]).parent == tmp_path / "ref" / "line"
+    assert r[4]["line_check"]["joined"] == ["0002"] and r[0]["line_check"]["joined"] == []
+    short, _ = sf.read(r[4]["line"])
+    assert len(short) / expressive.REF_SR == pytest.approx(0.6 + 2.5 + 0.15 + 4 * 0.12, abs=0.1)
     assert r[0]["spk"] == res["speakers"]["S1"]["ref"] and r[1]["spk"] == res["speakers"]["S2"]["ref"]
+    # no language: the subtitle times are used as they are
+    assert r[0]["start"] == sents[0]["start"] and r[0]["line_check"]["aligned"] is False
 
 
 def test_analyze_source_one_speaker_without_labels(tmp_path):
@@ -147,7 +151,7 @@ def test_analyze_source_one_speaker_without_labels(tmp_path):
     res = expressive.analyze_source(sents, p, tmp_path / "ref", expressive.ExprConfig(diarize=False),
                                     voice_refs=False)
     assert {x["speaker"] for x in res["sentences"]} == {"S1"} and res["speakers"] == {}
-    assert all(x["spk"] is None and x["emo"] for x in res["sentences"])
+    assert all(x["spk"] is None and x["line"] for x in res["sentences"])
 
 
 # ------------------------------------------------------------------ dubbing project
@@ -168,10 +172,11 @@ def _dub(tmp_path, **cfg_kw):
     texts = ["First line here, calm.", "Second speaker, also calm.", "Now I shout, really loud!", "Calm again, at the end."]
     for s, a, t in zip(sents, ana["sentences"], texts):
         s.update({k: v for k, v in a.items() if v is not None}, text=t)
-    cfg = DubConfig(qa=False, breaths=False, lang="EN", timeline=True, source_emo=True, follow_dynamics=True,
-                    source_pauses=True, emo_alpha=0.9, emo_floor=0.4, **cfg_kw)
+    cfg = DubConfig(qa=False, breaths=False, lang="EN", timeline=True, line_ref=True, follow_dynamics=True,
+                    source_pauses=True, **cfg_kw)
     spk = ana["speakers"]["S1"]["ref"]
-    dubbing.create_project(tmp_path / "p", "", spk, None, cfg, sentences=sents, speakers=ana["speakers"])
+    dubbing.create_project(tmp_path / "p", "", spk, None, cfg, sentences=sents, speakers=ana["speakers"],
+                           acoustics=ana["acoustics"])
     return tmp_path / "p", ana
 
 
@@ -182,14 +187,21 @@ def test_per_sentence_references(tmp_path):
     w = FakeWorker()
     for sid in (1, 2, 3):
         dubbing.synth_segment(pdir, sid, w)
-    c1, c2, c3 = w.calls
-    assert c1["spk"] == ana["speakers"]["S1"]["ref"] and c2["spk"] == ana["speakers"]["S2"]["ref"]
-    assert c1["emo"] == ana["sentences"][0]["emo"] and c3["emo"] == ana["sentences"][2]["emo"]
-    assert 0.4 <= c1["emo_alpha"] < c3["emo_alpha"] <= 0.9
-    # turned off: the project's single emotion reference (none here) and the global weight
-    dubbing.set_config(pdir, source_emo=False)
-    dubbing.synth_segment(pdir, 3, w)
-    assert w.calls[-1]["emo"] is None and w.calls[-1]["emo_alpha"] == 0.9
+    # every sentence is generated from its own original line, no separate emotion reference,
+    # with the timbre rendered from the speaker's stable voice reference
+    for c, a in zip(w.calls, ana["sentences"]):
+        assert c["spk"] == a["line"] and c["emo"] is None and c["timbre"] == a["spk"]
+    dubbing.set_config(pdir, stable_timbre=False)
+    dubbing.synth_segment(pdir, 1, w)
+    assert w.calls[-1]["spk"] == ana["sentences"][0]["line"] and w.calls[-1]["timbre"] is None
+    # turned off: the speaker's voice reference
+    dubbing.set_config(pdir, line_ref=False)
+    dubbing.synth_segment(pdir, 2, w)
+    assert w.calls[-1]["spk"] == ana["speakers"]["S2"]["ref"] and w.calls[-1]["emo"] is None
+    assert w.calls[-1]["timbre"] is None                  # the voice reference itself: nothing to split
+    # an older project's settings (keys that no longer exist) still load
+    dubbing.update(pdir, lambda p: p["config"].update(source_emo=True, emo_floor=0.45))
+    dubbing.synth_segment(pdir, 1, w)
 
 
 @needs_ffmpeg
@@ -224,7 +236,7 @@ def test_event_lines_are_not_analysed(tmp_path):
     sents[1].pop("speaker")
     res = expressive.analyze_source(sents, p, tmp_path / "ref", expressive.ExprConfig(diarize=False))
     r = res["sentences"]
-    assert r[1]["emo"] is None and r[1]["src_level"] is None and r[1]["expr"] == 0.0
+    assert r[1]["line"] is None and r[1]["src_level"] is None and r[1]["expr"] == 0.0
     assert r[1]["speaker"] in ("S1", "S2")
 
 
@@ -232,4 +244,19 @@ def test_line_over_silence_is_skipped(tmp_path):
     p, sents = _recording(tmp_path)
     sents.append({"start": sents[-1]["end"] + 0.1, "end": sents[-1]["end"] + 0.45, "speaker": "A"})   # trailing silence
     r = expressive.analyze_source(sents, p, tmp_path / "ref", expressive.ExprConfig(diarize=False))["sentences"]
-    assert r[-1]["emo"] is None and r[-1]["src_level"] is None and r[-1]["expr"] == 0.0
+    assert r[-1]["line"] is None and r[-1]["src_level"] is None and r[-1]["expr"] == 0.0
+
+
+@needs_ffmpeg
+def test_assemble_matches_the_tonal_balance(tmp_path):
+    pdir, ana = _dub(tmp_path)
+    assert set(ana["acoustics"]) == {"S1", "S2"} and len(ana["acoustics"]["S1"]["bands"]) == 23
+    w = FakeWorker()
+    for sid in (1, 2, 3, 4):
+        dubbing.synth_segment(pdir, sid, w)
+    assert dubbing.assemble(pdir, dubbing.load(pdir))["tone_eq"] == {}          # off by default
+    dubbing.set_config(pdir, match_tone=True)
+    mix = dubbing.assemble(pdir, dubbing.load(pdir))
+    assert set(mix["tone_eq"]) == {"S1", "S2"}
+    g = np.array(mix["tone_eq"]["S1"])
+    assert np.all(np.abs(g) <= 6.0) and np.any(np.abs(g) > 0.5)

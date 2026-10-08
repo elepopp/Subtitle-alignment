@@ -19,9 +19,9 @@ What makes AI speech sound less synthetic (``naturalize``):
   "air" a 22 kHz model cannot produce (nothing above 11 kHz otherwise)
 * a little harmonic warmth (soft saturation)
 * emphasised words (<重|...>) are located with CTC and lifted a few dB
-For a translated dub with the original recording (:mod:`.expressive`) each sentence
-takes its emotion from its original line, each speaker keeps their own voice, and
-loudness and in-sentence pauses follow the original instead of being evened out.
+For a translated dub with the original recording (:mod:`.expressive`, :mod:`.linerefs`)
+each sentence is generated from its own original line, and loudness and in-sentence
+pauses follow the original instead of being evened out.
 Then the regular voice-over chain (:mod:`subalign.studio`) runs: EQ, de-ess,
 compression, optional reverb / BGM, loudness, export.
 """
@@ -71,17 +71,48 @@ class DubConfig:
     timeline: bool = False
     max_stretch: float = 1.15
     min_stretch: float = 0.93
-    # translated dub with the original recording (:mod:`.expressive`): every sentence uses
-    # its own original line as the emotion reference, weighted between ``emo_floor`` (a
-    # calm line) and ``emo_alpha`` (the most expressive); each speaker has their own voice
-    source_emo: bool = False
-    emo_floor: float = 0.45
+    # translated dub with the original recording (:mod:`.linerefs`): every sentence is
+    # generated from its own original line (aligned, cut in the gaps, checked by ear) as
+    # the only reference - voice and delivery both come from it, no separate emotion
+    # reference (IndexTTS-2.5 adds the emotion vector to the speaker embedding, so a
+    # second reference moved the timbre and made the Chinese dub ~3 semitones higher)
+    line_ref: bool = False
+    # ... while the timbre comes from the speaker's stable voice reference: IndexTTS's
+    # acoustic renderer (which largely decides the timbre) is conditioned on it, the
+    # language model (rhythm, tone) on the line (``timbre`` in ``webui/tts_worker.py``) -
+    # a short line alone as the reference made the voice drift (similarity 0.65 vs 0.75)
+    stable_timbre: bool = True
+    # on a timeline every take is generated at the pace that fits it before the next
+    # sentence: the renderer speaks faster itself (``target`` in ``webui/tts_worker.py``,
+    # down to ``pace_min`` of its natural length) instead of the take being sped up
+    # afterwards or pushed late.  A take shorter than the original line is only slowed a
+    # little (``pace_max``) and not slowed again on assembly: Chinese is shorter than the
+    # English it replaces (here 0.81 of the original's length at a normal 0.97x Chinese
+    # rate), and filling the original's length made it ~20% too slow
+    pace: bool = True
+    pace_min: float = 0.82
+    pace_max: float = 1.05
+    # IndexTTS's acoustic renderer: guidance strength (how closely it follows the voice
+    # reference) and diffusion steps.  1.0 / 50 (library: 0.7 / 25) was closer to the
+    # speaker on all of 8 test sentences (similarity +0.026), ~1.5x the time
+    render_cfg: float = 1.0
+    render_steps: int = 50
+    # every speaker's sentences get an EQ that brings the finished dub's tonal balance
+    # (after the de-mechanising chain) to the original speaker's (:mod:`.acoustics`),
+    # 100 Hz - 10 kHz, at most ``tone_max_db``.  No room reverb: the originals measured
+    # fairly dry, and matching their decay with reverb lowered the voice similarity
+    match_tone: bool = False
+    tone_max_db: float = 6.0
     # sentence loudness follows the original line (offset from the median, capped)
     # instead of being evened out
     follow_dynamics: bool = False
     dynamics_range_db: float = 8.0
     # pauses inside an original line are re-placed at the matching clause boundary
     source_pauses: bool = False
+    # several takes per sentence, ranked by misreading, voice similarity, closeness to
+    # the original line's performance and fit on the timeline (:mod:`.takeqa`)
+    pick_best: bool = False
+    candidates: int = 2
 
 
 # ------------------------------------------------------------------ engine worker
@@ -182,7 +213,7 @@ def _now() -> float:
 
 def create_project(pdir: Path, script: str, spk: Path, emo: Optional[Path], cfg: DubConfig, title: str = "",
                    sentences: Optional[List[Dict]] = None, source: Optional[Dict] = None,
-                   speakers: Optional[Dict] = None) -> Dict:
+                   speakers: Optional[Dict] = None, acoustics: Optional[Dict] = None) -> Dict:
     """``script``: the text, raw or already reviewed (markup allowed).  It is always
     normalised (idempotent), so notes / emoji / digits never reach the engine.
 
@@ -200,13 +231,13 @@ def create_project(pdir: Path, script: str, spk: Path, emo: Optional[Path], cfg:
         script = "\n".join(s["text"] for s in segs)
     proj = {"version": 1, "title": title or "AI 配音", "created": _now(), "spk": str(spk), "emo": str(emo) if emo else None,
             "script": script, "config": asdict(cfg), "mix": None, "final": None, "source": source,
-            "speakers": speakers or {},
+            "speakers": speakers or {}, "acoustics": acoustics or {},
             "segments": [dict(s, id=i + 1, status="pending", audio=None, takes=[], qa=None) for i, s in enumerate(segs)]}
     save(pdir, proj)
     return proj
 
 
-EXPR_KEYS = ("speaker", "spk", "emo", "expr", "src_level", "src_pauses")
+EXPR_KEYS = ("speaker", "spk", "line", "line_check", "expr", "src_level", "src_pauses", "src_spread", "src_f0")
 
 
 def _timed_segments(sentences: List[Dict], lang: str) -> List[Dict]:
@@ -312,15 +343,29 @@ def _units(text: str, lang: str) -> List[str]:
 _ASR = {}
 
 
+def asr_backend():
+    """The recogniser used to check takes and reference clips (loaded once), 8-bit.  In
+    float16 next to the IndexTTS worker (~8.7 GB) it filled an 11 GB card and generation
+    slowed from ~6 s to over 100 s a sentence as Windows paged GPU memory; 8-bit takes
+    ~1.1 GB (0.3 s a check, generation unaffected).  On the CPU (7 s a check, whatever
+    the length: Whisper always encodes 30 s) only when the GPU has no room for it."""
+    from ..asr import get_backend
+    from .linerefs import _device_for
+
+    if "asr" not in _ASR:
+        dev = _device_for(min_free_gb=1.5)
+        _ASR["asr"] = get_backend("faster-whisper", model="large-v3-turbo", device=dev,
+                                  compute_type="int8_float16" if dev == "cuda" else "int8")
+        log.info("take check (Whisper) on %s", dev)
+    return _ASR["asr"]
+
+
 def check_take(path: Path, text: str, lang: str = "zh") -> Dict:
     """Transcribe a take and compare with the intended text: character (CJK) / word
     error rate where a homophone (same reading, other character) counts as correct."""
     from ..align.sequence import align_keys
-    from ..asr import get_backend
 
-    if "asr" not in _ASR:
-        _ASR["asr"] = get_backend("faster-whisper", model="large-v3-turbo")
-    tr = _ASR["asr"].transcribe(str(path), language=lang, vad=False)
+    tr = asr_backend().transcribe(str(path), language=lang, vad=False)
     joiner = "" if textprep.is_cjk_lang(lang) else " "
     heard = joiner.join(s.text.strip() for s in tr.segments)
     # whisper writes numbers as digits: read them out the same way as the script
@@ -492,51 +537,125 @@ def _resample(y: np.ndarray, a: int, b: int) -> np.ndarray:
 
 
 # ------------------------------------------------------------------ synthesis
+def config(proj: Dict) -> DubConfig:
+    """The project's settings (keys of older versions ignored)."""
+    return DubConfig(**{k: v for k, v in proj["config"].items() if k in DubConfig.__dataclass_fields__})
+
+
+def speaker_ref(proj: Dict, seg: Dict) -> str:
+    """The sentence's speaker's voice reference (the project's voice without one)."""
+    return seg["spk"] if seg.get("spk") and Path(seg["spk"]).exists() else proj["spk"]
+
+
 def references(proj: Dict, seg: Dict, cfg: DubConfig) -> tuple:
-    """(voice reference, emotion reference, emotion weight) for one sentence: its
-    speaker's voice and its own original line when the project has them."""
-    spk = seg.get("spk") if seg.get("spk") and Path(seg["spk"]).exists() else proj["spk"]
-    if cfg.source_emo and seg.get("emo") and Path(seg["emo"]).exists():
-        hi = cfg.emo_alpha
-        lo = min(cfg.emo_floor, hi)
-        return spk, seg["emo"], round(lo + (hi - lo) * float(seg.get("expr") or 0.0), 3)
-    return spk, proj.get("emo"), cfg.emo_alpha
+    """(voice reference, emotion reference, emotion weight) for one sentence: its own
+    original line when the project uses line references (IndexTTS then takes the
+    delivery from it too), else its speaker's voice + the project's emotion reference."""
+    if cfg.line_ref and seg.get("line") and Path(seg["line"]).exists():
+        return seg["line"], None, cfg.emo_alpha
+    return speaker_ref(proj, seg), proj.get("emo"), cfg.emo_alpha
+
+
+def _err(take: Dict) -> Optional[float]:
+    return (take.get("qa") or {}).get("error")
+
+
+def _best_take(takes: List[Dict], ranked: bool) -> Dict:
+    """Lowest ``score.total`` when ranked, else the fewest misread characters (a take
+    that could not be checked only wins when no take was checked)."""
+    if ranked and all(t.get("score") for t in takes):
+        return min(takes, key=lambda t: t["score"]["total"])
+    checked = [t for t in takes if _err(t) is not None]
+    return min(checked, key=_err) if checked else takes[0]
+
+
+DEFAULT_EDGE = 0.25
+
+
+def take_edges(proj: Dict, n: int = 30) -> float:
+    """Seconds of silence / noise a raw take has around its speech (removed by
+    :func:`trim_take`), from the project's recent takes."""
+    d = [t["duration"] - t["speech"] for s in proj["segments"] for t in s.get("takes", [])
+         if t.get("duration") and t.get("speech")]
+    return float(np.median(d[-n:])) if d else DEFAULT_EDGE
+
+
+def pace_target(proj: Dict, seg: Dict, cfg: DubConfig) -> Optional[float]:
+    """Raw length (seconds) a take of ``seg`` should have: the original line's length,
+    never more than the time until the next sentence, at the project's speed, plus the
+    usual silence around a take's speech.  None when the sentence is not on a timeline."""
+    from .takeqa import slot_for
+
+    if not (cfg.timeline and cfg.pace and seg.get("src_start") is not None and seg.get("src_end") is not None):
+        return None
+    i = proj["segments"].index(seg)
+    slot = slot_for(seg, proj["segments"][i + 1] if i + 1 < len(proj["segments"]) else None)
+    want = seg["src_end"] - seg["src_start"]
+    if slot:
+        want = min(want, slot)
+    if want <= 0.2:
+        return None
+    return round(want / max(0.5, min(2.0, cfg.speed)) + take_edges(proj), 3)
 
 
 def synth_segment(pdir: Path, sid: int, worker: Optional[TTSWorker] = None) -> Dict:
-    """(Re)generate one sentence; with QA it tries up to ``max_tries`` seeds and keeps
-    the take with the fewest misread characters."""
+    """(Re)generate one sentence.  With QA it tries up to ``max_tries`` seeds until a
+    take reads correctly; with ``pick_best`` at least ``candidates`` takes are made and
+    the best by :mod:`.takeqa` is kept (still up to ``max_tries`` while none reads
+    correctly)."""
+    from . import takeqa
+
     worker = worker or WORKER
     proj = update(pdir, lambda p: find(p, sid).update(status="running"))
-    cfg = DubConfig(**proj["config"])
+    cfg = config(proj)
     seg = find(proj, sid)
     text, tts_text = seg["text"], seg["tts_text"]
     spk, emo, alpha = references(proj, seg, cfg)
+    voice = speaker_ref(proj, seg)          # what a take is compared with for voice drift
+    timbre = voice if cfg.line_ref and cfg.stable_timbre and spk != voice and Path(voice).exists() else None
+    ranked = cfg.pick_best
+    at_least = max(1, int(cfg.candidates)) if ranked else 1
+    tries = max(at_least, cfg.max_tries if cfg.qa else 1)
+    target = pace_target(proj, seg, cfg)
+    slot = None
+    if ranked and cfg.timeline:
+        i = proj["segments"].index(seg)
+        slot = takeqa.slot_for(seg, proj["segments"][i + 1] if i + 1 < len(proj["segments"]) else None)
     (pdir / "seg").mkdir(exist_ok=True)
     takes: List[Dict] = []
-    best = None
     try:
-        for _ in range(max(1, cfg.max_tries if cfg.qa else 1)):
+        for k in range(tries):
             seed = random.randint(1, 2 ** 31 - 1)
             out = pdir / "seg" / f"{sid:04d}_{int(time.time() * 1000) % 10 ** 9:09d}.wav"
             r = worker.request(cmd="synth", text=tts_text, spk=spk, emo=emo,
                                emo_alpha=alpha, duration_factor=round(1 / max(0.5, min(2.0, cfg.speed)), 4),
-                               seed=seed, out=str(out), lang=cfg.lang)
+                               seed=seed, out=str(out), lang=cfg.lang, timbre=timbre, target=target,
+                               pace_range=[cfg.pace_min, cfg.pace_max], cfg_rate=cfg.render_cfg,
+                               steps=cfg.render_steps)
             take = {"file": f"seg/{out.name}", "seed": seed, "duration": r.get("duration"), "seconds": r.get("seconds"),
-                    "text": text, "emo_alpha": alpha if emo else None}
+                    "text": text, "emo_alpha": alpha if emo else None, "timbre": bool(timbre),
+                    "target": target, "natural": r.get("natural"), "pace": r.get("pace")}
+            try:
+                take["speech"] = round(len(trim_take(_load(out))) / SR, 3)
+            except Exception as e:
+                log.warning("could not measure take %s: %s", out.name, e)
             if cfg.qa:
                 try:
                     take["qa"] = check_take(out, text, cfg.lang.lower())
                 except Exception as e:
                     log.warning("QA failed: %s", e)
                     take["qa"] = {"error": None, "heard": f"(校验失败: {e})"}
+            if ranked:
+                try:
+                    m = takeqa.measure(out, seg, voice, performance=cfg.line_ref, slot=slot)
+                    take["measure"] = m
+                    take["score"] = takeqa.score(m, seg, _err(take), cfg.max_error, cfg.max_stretch)
+                except Exception as e:
+                    log.warning("take scoring failed: %s", e)
             takes.append(take)
-            err = (take.get("qa") or {}).get("error")
-            best_err = (best or {}).get("qa", {}) or {}
-            if best is None or (err is not None and (best_err.get("error") is None or err < best_err["error"])):
-                best = take
-            if err is None or err <= cfg.max_error:
+            if k + 1 >= at_least and any(_err(t) is None or _err(t) <= cfg.max_error for t in takes):
                 break
+        best = _best_take(takes, ranked)
     except Exception as e:
         def failed(p):
             s = find(p, sid)
@@ -549,6 +668,7 @@ def synth_segment(pdir: Path, sid: int, worker: Optional[TTSWorker] = None) -> D
         s = find(p, sid)
         s["takes"] = s.get("takes", []) + takes
         s["audio"], s["qa"], s["error"] = best["file"], best.get("qa"), None
+        s["measure"], s["score"], s["paced"] = best.get("measure"), best.get("score"), best.get("pace") is not None
         bad = cfg.qa and (s["qa"] or {}).get("error") is not None and s["qa"]["error"] > cfg.max_error
         s["status"] = "edited" if s["text"] != text else ("check" if bad else "done")
         s["updated"] = _now()
@@ -561,13 +681,14 @@ def use_take(pdir: Path, sid: int, file: str) -> Dict:
         s = find(p, sid)
         t = next(t for t in s.get("takes", []) if t["file"] == file)
         s["audio"], s["qa"], s["status"] = t["file"], t.get("qa"), "done"
+        s["measure"], s["score"], s["paced"] = t.get("measure"), t.get("score"), t.get("pace") is not None
     return find(update(pdir, fn), sid)
 
 
 def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
     """Takes -> one natural-sounding voice track (48 kHz) + per-sentence timing.  With
     ``timeline`` (a translated dub) sentences sit at the original times instead."""
-    cfg = DubConfig(**{k: v for k, v in proj["config"].items() if k in DubConfig.__dataclass_fields__})
+    cfg = config(proj)
     rng = np.random.default_rng(int(proj.get("created", 7)) % 2 ** 32)
     segs = [s for s in proj["segments"] if s.get("audio")]
     if not segs:
@@ -593,6 +714,7 @@ def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
         target = float(np.median([l for l in louds if l > -60] or [-23]))
         gains = [max(-6, min(6, target - l)) if l > -60 else 0.0 for l in louds]
     clips = [c * 10 ** (g / 20) for c, g in zip(clips, gains)]
+    eq_db = match_tone(clips, segs, proj, cfg) if cfg.match_tone else {}
     peak = max(float(np.max(np.abs(c))) if len(c) else 0.0 for c in clips)
     if peak > 0.95:                     # loud lines lifted: scale everything, keep the contrast
         clips = [c * (0.95 / peak) for c in clips]
@@ -609,7 +731,7 @@ def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
     # breaths of each sentence's own speaker (their voice reference)
     breaths: List[List[np.ndarray]] = [[] for _ in segs]
     if cfg.breaths:
-        refs = [references(proj, s, cfg)[0] for s in segs]
+        refs = [speaker_ref(proj, s) for s in segs]
         found = {r: harvest_breaths(Path(r)) for r in set(refs)}
         if any(found.values()):
             # a breath sits ~24 dB under the voice (the sentences were loudness-matched, the
@@ -624,7 +746,7 @@ def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
         y, timing = _place_on_timeline(clips, segs, cfg, breaths)
         for t, g, n_p in zip(timing, gains, placed_pauses):
             t.update(gain_db=round(g, 1), pauses=n_p)
-        return _finish(pdir, proj, y, timing, cfg, tone_lvl, out)
+        return _finish(pdir, proj, y, timing, cfg, tone_lvl, out, tone_eq=eq_db)
     parts: List[np.ndarray] = [np.zeros(int(0.25 * SR), np.float32)]
     timing = []
     t = len(parts[0])
@@ -643,15 +765,39 @@ def assemble(pdir: Path, proj: Dict, out: Optional[Path] = None) -> Dict:
         parts.append(c)
         t += len(c)
     parts.append(np.zeros(int(0.4 * SR), np.float32))
-    return _finish(pdir, proj, np.concatenate(parts), timing, cfg, tone_lvl, out)
+    return _finish(pdir, proj, np.concatenate(parts), timing, cfg, tone_lvl, out, tone_eq=eq_db)
 
 
-def fit_factor(length: float, slot: float, natural: float, cfg: DubConfig) -> float:
+def match_tone(clips: List[np.ndarray], segs: List[Dict], proj: Dict, cfg: DubConfig) -> Dict[str, List[float]]:
+    """EQ every speaker's clips (in place) toward the original speaker's tonal balance,
+    measured on the clips as the de-mechanising chain will leave them.  Returns the
+    band gains used per speaker."""
+    from . import acoustics
+
+    targets = proj.get("acoustics") or {}
+    used: Dict[str, List[float]] = {}
+    for spk in sorted({s.get("speaker") or "S1" for s in segs}):
+        prof = targets.get(spk) or (next(iter(targets.values())) if len(targets) == 1 else None)
+        idx = [i for i, s in enumerate(segs) if (s.get("speaker") or "S1") == spk]
+        if not prof or not idx:
+            continue
+        gap = np.zeros(int(0.4 * SR), np.float32)
+        joined = np.concatenate([c for i in idx for c in (clips[i], gap)])
+        now = acoustics.band_levels(naturalize(joined, cfg), SR)
+        g = acoustics.eq_gains(np.array(prof["bands"]), now, max_db=cfg.tone_max_db)
+        for i in idx:
+            clips[i] = acoustics.apply_eq(clips[i], SR, g)
+        used[spk] = [round(float(x), 1) for x in g]
+    return used
+
+
+def fit_factor(length: float, slot: float, natural: float, cfg: DubConfig, paced: bool = False) -> float:
     """Tempo factor (> 1 = faster) for a take of ``length`` s in a slot of ``slot`` s
-    (until the next sentence) where the original took ``natural`` s."""
+    (until the next sentence) where the original took ``natural`` s.  A ``paced`` take
+    (generated at its pace already) is only sped up when it still does not fit."""
     if length > slot > 0:
         return min(cfg.max_stretch, length / slot)
-    if natural > 0 and length < natural * 0.85:
+    if not paced and natural > 0 and length < natural * 0.85:
         return max(cfg.min_stretch, length / natural)
     return 1.0
 
@@ -670,7 +816,7 @@ def _place_on_timeline(clips: List[np.ndarray], segs: List[Dict], cfg: DubConfig
         nxt = segs[i + 1]["src_start"] if i + 1 < len(segs) else None
         natural = (s.get("src_end") or s["src_start"]) - s["src_start"]
         slot = (nxt - s["src_start"] - 0.08) if nxt is not None else natural + 1.0
-        f = fit_factor(len(c) / SR, slot, natural, cfg)
+        f = fit_factor(len(c) / SR, slot, natural, cfg, paced=bool(s.get("paced")))
         if abs(f - 1) >= 0.01:
             c = stretch(c, f)
         at = max(start, cursor + (gap_min if placed else 0))
@@ -690,7 +836,7 @@ def _place_on_timeline(clips: List[np.ndarray], segs: List[Dict], cfg: DubConfig
 
 
 def _finish(pdir: Path, proj: Dict, y: np.ndarray, timing: List[Dict], cfg: DubConfig, tone_lvl: float,
-            out: Optional[Path]) -> Dict:
+            out: Optional[Path], tone_eq: Optional[Dict] = None) -> Dict:
     from ..audio.io import save_audio
 
     if tone_lvl:
@@ -703,7 +849,7 @@ def _finish(pdir: Path, proj: Dict, y: np.ndarray, timing: List[Dict], cfg: DubC
     out = out or pdir / "mix.wav"
     save_audio(out, np.clip(y, -1, 1), SR)
     mix = {"file": out.name, "built": _now(), "duration": round(len(y) / SR, 2), "timing": timing,
-           "missing": [s["id"] for s in proj["segments"] if not s.get("audio")]}
+           "missing": [s["id"] for s in proj["segments"] if not s.get("audio")], "tone_eq": tone_eq or {}}
     update(pdir, lambda p: p.update(mix=mix))
     return mix
 

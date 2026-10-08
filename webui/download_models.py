@@ -23,7 +23,25 @@ HF_REPOS = {
             "jonatasgrosman/wav2vec2-large-xlsr-53-japanese",
             "MahmoudAshraf/mms-300m-1130-forced-aligner"],
 }
-LLM_MODEL = "qwen2.5:7b"
+LLM_MODEL = "index-translate:9b-q5"
+# not in the Ollama registry: the GGUF comes from ModelScope and is imported with this Modelfile.
+# Ollama does not convert the GGUF's jinja chat template, so it is spelled out (thinking off)
+LLM_GGUF = ("IndexTeam/Index-Translate-9B-GGUF", "Index-Translate-9B.Q5_K_M.gguf")
+LLM_MODELFILE = '''FROM ./{gguf}
+TEMPLATE """{{{{- if .System }}}}<|im_start|>system
+{{{{ .System }}}}<|im_end|>
+{{{{ end }}}}<|im_start|>user
+{{{{ .Prompt }}}}<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+{{{{ .Response }}}}"""
+PARAMETER stop <|im_end|>
+PARAMETER stop <|im_start|>
+PARAMETER temperature 0
+'''
 UVR_MODEL = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
 
 
@@ -87,10 +105,21 @@ def dl_campplus() -> None:
 
 
 def dl_llm() -> None:
-    from webui.ollama import ensure_server
+    import shutil
+
+    from modelscope.hub.file_download import model_file_download
+
+    from webui.ollama import ensure_server, models
 
     ensure_server()
-    subprocess.run([str(paths.OLLAMA_EXE), "pull", LLM_MODEL], check=True)
+    if LLM_MODEL in models():
+        return
+    tmp = paths.MODELS / "gguf"
+    repo, name = LLM_GGUF
+    model_file_download(repo, name, local_dir=str(tmp))
+    (tmp / "Modelfile").write_text(LLM_MODELFILE.format(gguf=name), encoding="utf-8")
+    subprocess.run([str(paths.OLLAMA_EXE), "create", LLM_MODEL, "-f", "Modelfile"], cwd=tmp, check=True)
+    shutil.rmtree(tmp)                                     # Ollama keeps its own copy in models/ollama
 
 
 def dl_indextts() -> None:

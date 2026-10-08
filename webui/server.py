@@ -925,7 +925,7 @@ def _dub_view(pid: str) -> Dict[str, Any]:
         elif s.get("status") == "running" and st.get("running") != s["id"]:
             s["status"] = "error" if not s.get("audio") else "done"     # interrupted by a restart
         s["url"] = f"/dub/{pid}/{s['audio']}?v={s.get('updated', 0)}" if s.get("audio") else None
-        s["emo_url"] = _dub_rel_url(pid, s.get("emo"))
+        s["line_url"] = _dub_rel_url(pid, s.get("line"))
         for t in s.get("takes", []):
             t["url"] = f"/dub/{pid}/{t['file']}"
     if proj.get("mix"):
@@ -1652,10 +1652,11 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
                         separate: bool = Form(True)):
     """The translation -> an AI voice-over project (one sentence each, original timing kept).
 
-    ``expressive`` (with the original recording and timing): each speaker is cloned
-    separately and every sentence takes its emotion from its own original line; loudness
-    and in-sentence pauses follow the original (:mod:`subalign.tts.expressive`).  An
-    uploaded voice A replaces the per-speaker voices, an emotion B the per-line emotion.
+    ``expressive`` (with the original recording and timing): every sentence is generated
+    from its own original line - aligned to the audio, cut in the gaps, checked by ear
+    (:mod:`subalign.tts.linerefs`); loudness and in-sentence pauses follow the original
+    (:mod:`subalign.tts.expressive`).  An uploaded voice A or emotion B replaces the
+    line references (one voice / one tone for everything).
     Without a vocals stem the original is separated first (``separate``; cached and
     reused by the translated video), so music does not end up in the references."""
     import asyncio
@@ -1665,9 +1666,10 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
     proj = _dt_get(pid)
     if _dt_state.get(pid, {}).get("busy"):
         raise HTTPException(409, "还在翻译，请等翻译完成")
+    # sound-event lines ([music], (applause)) are not read out: the background has the sound
     sents = [{"text": s.get("translation") or "", "start": s.get("start"), "end": s.get("end"), "source_text": s["text"],
               "dt_id": s["id"], "speaker": s.get("speaker")}
-             for s in proj["sentences"] if (s.get("translation") or "").strip()]
+             for s in proj["sentences"] if (s.get("translation") or "").strip() and not expr.is_event(s["text"])]
     if not sents:
         raise HTTPException(400, "还没有译文")
     try:
@@ -1680,14 +1682,16 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
     src_audio = next((Path(p) for p in (src.get("vocals_path"), src.get("media_path")) if p and Path(p).exists()), None)
     timed = timeline and all(s["start"] is not None for s in sents)
     speakers_info: Dict[str, Any] = {}
+    acoustics_info: Dict[str, Any] = {}
     try:
         spk_p = await _ref_audio(ddir / "ref", spk, spk_recording)
         emo_p = await _ref_audio(ddir / "ref", emo, emo_recording)
         if spk_p is None and not use_source:
             raise HTTPException(400, "请上传或选择音色参考 A")
-        voice_refs, emo_refs = spk_p is None, emo_p is None
+        voice_refs = spk_p is None
+        line_refs = voice_refs and emo_p is None
         ana = None
-        if expressive and timed and src_audio is not None and (voice_refs or emo_refs):
+        if expressive and timed and src_audio is not None:
             media = src.get("media_path")
             if separate and not (src.get("vocals_path") and Path(src["vocals_path"]).exists()) and media and Path(media).exists():
                 from subalign.dubvideo import separate_background
@@ -1701,14 +1705,17 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
             try:
                 ana = await asyncio.to_thread(
                     expr.analyze_source, sents, src_audio, ddir / "ref",
-                    expr.ExprConfig(diarize=diarize, n_speakers=speakers or None), voice_refs=voice_refs, emo_refs=emo_refs)
+                    expr.ExprConfig(diarize=diarize, n_speakers=speakers or None), voice_refs=voice_refs,
+                    line_refs=line_refs, lang=(proj["config"].get("source") or "").split("-")[0] or None)
             except Exception:                       # fall back to one voice / one tone
                 log.exception("analysis of the original performance failed")
         if ana is not None:
             for s, a in zip(sents, ana["sentences"]):
                 s.update({k: v for k, v in a.items() if v is not None})
             speakers_info = ana["speakers"]
-            cd.setdefault("source_emo", emo_refs)
+            acoustics_info = ana.get("acoustics") or {}
+            cd.setdefault("match_tone", bool(acoustics_info))
+            cd.setdefault("line_ref", line_refs)
             cd.setdefault("follow_dynamics", True)
             cd.setdefault("source_pauses", True)
         else:
@@ -1724,11 +1731,11 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
     cd.update(lang=TTS_LANG.get(tgt, tgt.split("-")[0].upper()),
               timeline=bool(timeline and all(s["start"] is not None for s in sents)))
     if not expressive:
-        cd.update(source_emo=False, follow_dynamics=False, source_pauses=False)
+        cd.update(line_ref=False, follow_dynamics=False, source_pauses=False, match_tone=False)
     cfg = dubbing.DubConfig(**{k: v for k, v in cd.items() if k in dubbing.DubConfig.__dataclass_fields__})
     dp = dubbing.create_project(ddir, "", spk_p, emo_p, cfg, title or proj.get("title", ""), sentences=sents,
                                 source={"dubtrans": pid, "media_url": _dt_view(pid).get("media_url")},
-                                speakers=speakers_info)
+                                speakers=speakers_info, acoustics=acoustics_info)
     with _dt_lock:
         p2 = _dt_get(pid)
         p2.setdefault("dubbing", []).append(did)
@@ -1737,6 +1744,129 @@ async def dt_to_dubbing(pid: str, use_source: bool = Form(True), spk: Optional[U
         ollama.unload_all()                         # the translation model would crowd out IndexTTS
         _tts_enqueue(did, [s["id"] for s in dp["segments"]])
     return {"id": did}
+
+
+# ------------------------------------------------------------------ blind listening tests (盲听对比)
+LISTEN_DIR = paths.WORK / "listening"
+
+
+def _listen_dir(tid: str) -> Path:
+    d = LISTEN_DIR / Path(tid).name
+    if not (d / "test.json").exists():
+        raise HTTPException(404, "test not found")
+    return d
+
+
+def _dub_source_audio(proj: Dict[str, Any]) -> Optional[Path]:
+    """The original recording behind a translated dub: its vocals stem when there is one."""
+    did = (proj.get("source") or {}).get("dubtrans")
+    if not did or not (DT_DIR / did / "project.json").exists():
+        return None
+    d = DT_DIR / did
+    src = json.loads((d / "project.json").read_text(encoding="utf-8")).get("source", {})
+    for c in (d / "stems" / "vocals.wav", src.get("vocals_path"), src.get("media_path")):
+        if c and Path(c).exists():
+            return Path(c)
+    return None
+
+
+@app.get("/api/listen/candidates")
+def listen_candidates():
+    """Dubbing projects with generated sentences, grouped by the translation they dub."""
+    out = []
+    for f in sorted(DUB_DIR.glob("*/project.json"), reverse=True) if DUB_DIR.exists() else []:
+        try:
+            p = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        done = sum(1 for s in p.get("segments", []) if s.get("audio"))
+        if done:
+            out.append({"id": f.parent.name, "title": p.get("title", ""), "done": done, "total": len(p.get("segments", [])),
+                        "dubtrans": (p.get("source") or {}).get("dubtrans"),
+                        "config": {k: p.get("config", {}).get(k) for k in ("line_ref", "stable_timbre", "pace", "timeline")}})
+    return out
+
+
+@app.post("/api/listen/tests")
+def listen_create(body: Dict[str, Any] = Body(...)):
+    from subalign import listening
+    from subalign.tts import dubbing
+
+    a, b = str(body.get("a") or ""), str(body.get("b") or "")
+    if not a or not b or a == b:
+        raise HTTPException(400, "请选择两个不同的配音项目")
+    da, db = _dub_dir(a), _dub_dir(b)
+    pa, pb = dubbing.load(da), dubbing.load(db)
+    tid = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+    try:
+        listening.create(LISTEN_DIR / tid, pa, da, pb, db, (body.get("label_a") or "A").strip()[:40],
+                         (body.get("label_b") or "B").strip()[:40], n=max(1, min(100, int(body.get("n") or 20))),
+                         source=_dub_source_audio(pa), title=(body.get("title") or "").strip()[:80])
+    except ValueError as e:
+        shutil.rmtree(LISTEN_DIR / tid, ignore_errors=True)
+        raise HTTPException(400, str(e))
+    return listen_get(tid)
+
+
+@app.get("/api/listen/tests")
+def listen_list():
+    from subalign import listening
+
+    out = []
+    for f in sorted(LISTEN_DIR.glob("*/test.json"), reverse=True) if LISTEN_DIR.exists() else []:
+        try:
+            t = listening.load(f.parent)
+        except (OSError, json.JSONDecodeError):
+            continue
+        v = listening.view(t)
+        out.append({"id": f.parent.name, "title": v["title"], "created": v["created"], "n": len(v["items"]),
+                    "answered": len(v["answers"]), "revealed": v["revealed"], "tally": v.get("tally")})
+    return out
+
+
+@app.get("/api/listen/tests/{tid}")
+def listen_get(tid: str):
+    from subalign import listening
+
+    v = listening.view(listening.load(_listen_dir(tid)))
+    v["id"] = tid
+    for it in v["items"]:
+        base = f"/listen/{tid}/{it['id']:03d}"
+        it.update(x=f"{base}_x.wav", y=f"{base}_y.wav", o=f"{base}_o.wav" if it["original"] else None)
+    return v
+
+
+@app.post("/api/listen/tests/{tid}/answer")
+def listen_answer(tid: str, body: Dict[str, Any] = Body(...)):
+    from subalign import listening
+
+    try:
+        listening.answer(_listen_dir(tid), int(body.get("item")), str(body.get("choice")), str(body.get("note") or ""))
+    except (KeyError, ValueError, TypeError) as e:
+        raise HTTPException(400, f"answer: {e}")
+    return listen_get(tid)
+
+
+@app.post("/api/listen/tests/{tid}/reveal")
+def listen_reveal(tid: str):
+    from subalign import listening
+
+    listening.reveal(_listen_dir(tid))
+    return listen_get(tid)
+
+
+@app.delete("/api/listen/tests/{tid}")
+def listen_delete(tid: str):
+    shutil.rmtree(_listen_dir(tid), ignore_errors=True)
+    return {"ok": True}
+
+
+@app.get("/listen/{tid}/{name}")
+def listen_file(tid: str, name: str):
+    p = _listen_dir(tid) / Path(name).name
+    if not p.is_file() or p.suffix != ".wav":
+        raise HTTPException(404)
+    return FileResponse(p, headers={"Cache-Control": "no-store"})
 
 
 # ------------------------------------------------------------------ translated video (视频翻译)
@@ -1763,7 +1893,13 @@ def _dv_sentences(proj: Dict[str, Any], did: Optional[str]) -> List[Dict[str, An
                             "original": (src or {}).get("text") or seg.get("source_text"),
                             "start": t["start"], "end": t["end"]})
             if out:
-                return out
+                # sound-event lines ([music]) are not dubbed but still captioned, at their own time
+                from subalign.tts.expressive import is_event
+
+                out += [{"text": s.get("translation") or "", "original": s["text"], "start": s["start"], "end": s["end"]}
+                        for s in proj["sentences"] if s.get("translation") and s.get("start") is not None
+                        and s.get("end") is not None and is_event(s["text"])]
+                return sorted(out, key=lambda x: x["start"])
     return [{"text": s.get("translation") or "", "original": s["text"], "start": s.get("start"), "end": s.get("end")}
             for s in proj["sentences"] if s.get("translation") and s.get("start") is not None]
 

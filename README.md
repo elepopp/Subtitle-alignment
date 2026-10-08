@@ -381,7 +381,7 @@ start.bat    :: 启动 http://127.0.0.1:7860 ，同时启动项目内的 Ollama
 | `models/modelscope` | FunASR Paraformer + VAD + 标点 |
 | `models/torch` | Demucs htdemucs |
 | `models/audio-separator` | BS-RoFormer |
-| `models/ollama` | 本地大模型 qwen2.5:7b（翻译 / 校对，`--llm-provider ollama`） |
+| `models/ollama` | 本地大模型 index-translate:9b-q5（Index-Translate-9B Q5_K_M，翻译 / 校对，`--llm-provider ollama`；GGUF 来自 ModelScope，由 `download_models.py llm` 导入） |
 
 单独补下载：`.venv\Scripts\python webui\download_models.py whisper ctc`（可选组：whisper、openai-whisper、ctc、demucs、uvr、funasr、llm）。
 
